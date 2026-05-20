@@ -22,15 +22,7 @@
       ]
     },
     "plugins": [
-      [
-        "react-native-ble-plx",
-        {
-          "isBackgroundEnabled": false,
-          "modes": ["peripheral", "central"],
-          "bluetoothAlwaysPermission": "Se necesita Bluetooth para detectar dispositivos cercanos"
-        }
-      ]
-    ],
-    "scheme": "outlethunter"
+      "react-native-ble-plx"
+    ]
   }
 }

@@ -1,26 +1,22 @@
 {
   "name": "outlet-hunter",
   "version": "1.0.0",
-  "main": "expo-router/entry",
+  "main": "index.js",
   "scripts": {
     "start": "expo start",
-    "android": "expo run:android",
-    "build": "eas build --platform android --profile preview"
+    "android": "expo run:android"
   },
   "dependencies": {
     "expo": "~52.0.0",
-    "expo-router": "~4.0.0",
-    "react": "18.3.1",
-    "react-native": "0.76.5",
-    "react-native-ble-plx": "^3.2.0",
-    "expo-permissions": "~14.4.0",
-    "react-native-svg": "15.8.0",
+    "expo-status-bar": "~2.0.0",
+    "expo-av": "~15.0.0",
     "expo-keep-awake": "~14.0.0",
-    "expo-haptics": "~14.0.0"
+    "expo-haptics": "~14.0.1",
+    "react": "18.3.1",
+    "react-native": "0.76.9",
+    "react-native-ble-plx": "^3.2.0"
   },
   "devDependencies": {
-    "@babel/core": "^7.24.0",
-    "typescript": "^5.3.0",
-    "@types/react": "~18.3.0"
+    "@babel/core": "^7.24.0"
   }
 }
