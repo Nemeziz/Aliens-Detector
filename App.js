@@ -11,6 +11,7 @@ import { Audio } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
+import RegisterMode from './RegisterMode';
 import {
   BLE_BACKGROUND_TASK,
   setupNotifications,
@@ -62,36 +63,82 @@ function rssiToRadarPos(pct, angleRad) {
 }
 function shortId(id) { return id.length > 17 ? id.slice(-17) : id; }
 
-// OUI — primeros 3 bytes del MAC → fabricante/tipo
+// OUI — primeros 3 bytes del MAC → { abbr, label, icon }
 const OUI = {
-  '28:6B:B4': '📱 Apple',  '68:DF:A5': '📱 Apple',  '61:AC:E9': '📱 Apple',
-  'A4:C3:F0': '📱 Apple',  'F0:DB:E2': '📱 Apple',  'DC:2C:26': '📱 Apple',
-  'A8:51:AB': '🎧 AirPods','F8:4D:89': '📱 Apple',  'BC:D0:74': '💻 MacBook',
-  'F4:7B:5E': '📱 Samsung','8C:F5:A3': '📱 Samsung','DC:71:96': '📱 Samsung',
-  'A0:82:1F': '⌚ Samsung', '78:BD:BC': '🎧 Samsung','CC:4B:73': '📱 Samsung',
-  'AC:C1:EE': '📱 Xiaomi', '64:B4:73': '📱 Xiaomi', 'F8:A2:D6': '⌚ Mi Band',
-  'F4:85:89': '📱 Pixel',  'A4:77:33': '📱 Pixel',
-  'AC:E0:10': '📱 Huawei', '54:92:BE': '⌚ Huawei',
-  'AC:87:A3': '⌚ Amazfit', 'C4:BE:84': '⌚ Fitbit',
-  '00:1D:0A': '⌚ Garmin',  '00:17:EF': '🎧 Sony',
-  'A8:9C:ED': '📱 Sony',   '00:15:5D': '💻 Microsoft',
+  // Apple / iPhone
+  '28:6B:B4': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
+  '68:DF:A5': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
+  '61:AC:E9': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
+  'A4:C3:F0': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
+  'F0:DB:E2': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
+  'DC:2C:26': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
+  'F8:4D:89': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
+  'BC:D0:74': { abbr: 'MAC', label: 'MacBook', icon: '💻' },
+  'A8:51:AB': { abbr: 'APD', label: 'AirPods', icon: '🎧' },
+  // Samsung
+  'F4:7B:5E': { abbr: 'SAM', label: 'Samsung', icon: '📱' },
+  '8C:F5:A3': { abbr: 'SAM', label: 'Samsung', icon: '📱' },
+  'DC:71:96': { abbr: 'SAM', label: 'Samsung', icon: '📱' },
+  'CC:4B:73': { abbr: 'SAM', label: 'Samsung', icon: '📱' },
+  'E4:A8:DF': { abbr: 'SAM', label: 'Samsung', icon: '📱' },
+  'A0:82:1F': { abbr: 'SGW', label: 'Galaxy W',icon: '⌚' },
+  '78:BD:BC': { abbr: 'SBD', label: 'Galaxy Buds', icon: '🎧' },
+  // Xiaomi
+  'AC:C1:EE': { abbr: 'XIA', label: 'Xiaomi',  icon: '📱' },
+  '64:B4:73': { abbr: 'XIA', label: 'Xiaomi',  icon: '📱' },
+  '28:6C:07': { abbr: 'XIA', label: 'Xiaomi',  icon: '📱' },
+  'F8:A2:D6': { abbr: 'MIB', label: 'Mi Band', icon: '⌚' },
+  // Google
+  'F4:85:89': { abbr: 'PIX', label: 'Pixel',   icon: '📱' },
+  'A4:77:33': { abbr: 'PIX', label: 'Pixel',   icon: '📱' },
+  '3C:28:6D': { abbr: 'PIX', label: 'Pixel',   icon: '📱' },
+  // Huawei
+  'AC:E0:10': { abbr: 'HUA', label: 'Huawei',  icon: '📱' },
+  '54:92:BE': { abbr: 'HUW', label: 'Huawei W',icon: '⌚' },
+  // OnePlus
+  '94:65:2D': { abbr: 'OPL', label: 'OnePlus', icon: '📱' },
+  // Sony
+  '00:17:EF': { abbr: 'SNY', label: 'Sony',    icon: '🎧' },
+  'A8:9C:ED': { abbr: 'SNY', label: 'Sony',    icon: '📱' },
+  // Motorola
+  'AC:37:43': { abbr: 'MOT', label: 'Moto',    icon: '📱' },
+  '9C:D2:1E': { abbr: 'MOT', label: 'Moto',    icon: '📱' },
+  // LG
+  'C4:36:6C': { abbr: 'LG',  label: 'LG',      icon: '📱' },
+  // Amazfit / Zepp
+  'AC:87:A3': { abbr: 'AMZ', label: 'Amazfit', icon: '⌚' },
+  // Fitbit
+  'C4:BE:84': { abbr: 'FIT', label: 'Fitbit',  icon: '⌚' },
+  // Garmin
+  '00:1D:0A': { abbr: 'GAR', label: 'Garmin',  icon: '⌚' },
+  // Microsoft
+  '00:15:5D': { abbr: 'MSF', label: 'PC',      icon: '💻' },
 };
 
 function resolveDevice(id, advertisedName) {
   const mac = id.replace(/-/g, ':').toUpperCase();
   const oui = mac.substring(0, 8);
-  const tail = mac.slice(-5).replace(':', '');
-  const ouiLabel = OUI[oui];
+  const tail = mac.slice(-4).toUpperCase(); // últimos 4 hex
+  const ouiEntry = OUI[oui];
   const firstByte = parseInt(mac.split(':')[0] || '0', 16);
   const isRandom = !!(firstByte & 0x02);
 
   let displayName = advertisedName;
   if (!displayName || displayName.startsWith('DEV-') || displayName.startsWith('[')) {
-    if (ouiLabel) displayName = `${ouiLabel}·${tail}`;
-    else if (isRandom) displayName = `🔀 BLE·${tail}`;
-    else displayName = `·${tail}`;
+    if (ouiEntry) {
+      displayName = `${ouiEntry.icon} ${ouiEntry.abbr}·${tail}`;
+    } else if (isRandom) {
+      displayName = `🔀·${tail}`;
+    } else {
+      displayName = `·${tail}`;
+    }
   }
-  return { displayName, ouiLabel: ouiLabel || (isRandom ? '🔀 Random' : ''), tail };
+
+  const ouiLabel = ouiEntry
+    ? `${ouiEntry.icon} ${ouiEntry.label}`
+    : isRandom ? '🔀 Random/Priv' : '';
+
+  return { displayName, ouiLabel, ouiEntry, tail, isRandom };
 }
 
 // ── Audio beep ────────────────────────────────────────────────────────────────
@@ -377,6 +424,7 @@ export default function App() {
   const [contactsModal, setContactsModal] = useState(false);
   const [resolvingGatt, setResolvingGatt] = useState(false);
   const [backgroundActive, setBackgroundActive] = useState(false);
+  const [registerModal, setRegisterModal] = useState(false);
   const scanRef = useRef(false);
   const sweepAngle = useRef(new Animated.Value(0)).current;
   const sweepAnim = useRef(null);
@@ -500,6 +548,18 @@ export default function App() {
       showForegroundNotification(alertContacts.map(c => c.alias));
     }
   }, [contacts, persistContacts, backgroundActive]);
+
+  // cuando RegisterMode encuentra un dispositivo → abrir SaveContactModal con él
+  const handleRegisterDevice = useCallback((dev) => {
+    setRegisterModal(false);
+    const displayDev = {
+      id: dev.id,
+      name: dev.name || nameCache[dev.id] || `DEV·${dev.id.slice(-4).toUpperCase()}`,
+      rssi: dev.rssi,
+      rssiHistory: [dev.rssi],
+    };
+    setTimeout(() => setSaveModal({ visible: true, device: displayDev }), 300);
+  }, [nameCache]);
 
   const handleDeleteContact = useCallback((id) => {
     const updated = { ...contacts };
@@ -699,6 +759,11 @@ export default function App() {
         </TouchableOpacity>
       </View>
 
+      {/* botón modo registro */}
+      <TouchableOpacity style={styles.btnRegister} onPress={() => setRegisterModal(true)}>
+        <Text style={styles.btnRegisterText}>[ ＋ REGISTRAR NUEVO CONTACTO ]</Text>
+      </TouchableOpacity>
+
       {/* botón background */}
       {alertContactCount > 0 && (
         <TouchableOpacity
@@ -788,6 +853,12 @@ export default function App() {
         onClose={() => setContactsModal(false)}
         onTrack={(id) => { setTrackedId(id); setContactsModal(false); }}
       />
+      <RegisterMode
+        visible={registerModal}
+        manager={manager.current}
+        onDeviceFound={handleRegisterDevice}
+        onClose={() => setRegisterModal(false)}
+      />
     </View>
   );
 }
@@ -834,6 +905,8 @@ const styles = StyleSheet.create({
   btnBackground: { borderWidth: 1, borderColor: '#333', borderRadius: 4, paddingVertical: 10, alignItems: 'center', marginBottom: 6 },
   btnBackgroundActive: { borderColor: '#ffaa00', backgroundColor: '#1a1200' },
   btnBackgroundText: { color: '#555', fontSize: 10, letterSpacing: 1, fontFamily: MONO },
+  btnRegister: { borderWidth: 1, borderColor: '#004422', borderRadius: 4, paddingVertical: 10, alignItems: 'center', marginBottom: 6 },
+  btnRegisterText: { color: '#008833', fontSize: 11, letterSpacing: 1, fontFamily: MONO },
   btnSecondary: { flex: 1, borderWidth: 1, borderColor: '#ffaa00', borderRadius: 4, paddingVertical: 10, alignItems: 'center' },
   btnSecondaryText: { color: '#ffaa00', fontSize: 11, letterSpacing: 1, fontFamily: MONO },
   btnCancel: { flex: 1, borderWidth: 1, borderColor: '#ff4444', borderRadius: 4, paddingVertical: 10, alignItems: 'center' },
