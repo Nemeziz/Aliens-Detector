@@ -8,7 +8,7 @@ import { useEffect } from 'react';
 const MONO = Platform.OS === 'ios' ? 'Courier' : 'monospace';
 const GREEN = '#00ff41';
 const DIMGREEN = '#00551a';
-const BG = '#0a0a12';
+const BG = '#0a0a14';
 
 const RSSI_MIN = -100;
 const RSSI_MAX = -45;
@@ -174,7 +174,7 @@ export default function ScanScreen({ visible, devices, contacts, onClose, onTrac
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: '#0a0a12' },
+  root: { flex: 1, backgroundColor: BG },
   header: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingHorizontal: 16, paddingTop: 12, paddingBottom: 10,
@@ -187,18 +187,18 @@ const styles = StyleSheet.create({
   legend: {
     flexDirection: 'row', justifyContent: 'space-around',
     paddingVertical: 6, paddingHorizontal: 8,
-    backgroundColor: '#111120', marginBottom: 4,
+    backgroundColor: '#111122', marginBottom: 4,
   },
-  legendItem: { color: '#6688aa', fontSize: 9, fontFamily: MONO },
+  legendItem: { color: '#5577aa', fontSize: 9, fontFamily: MONO },
 
   // filas
   row: {
     flexDirection: 'row', alignItems: 'center',
     paddingHorizontal: 12, paddingVertical: 10,
-    backgroundColor: '#0d0d1a',
+    backgroundColor: '#0d0d18',
   },
-  rowContact: { backgroundColor: '#0a1520', borderLeftWidth: 3, borderLeftColor: '#00ccff' },
-  separator: { height: 1, backgroundColor: '#1a1a2a', marginHorizontal: 12 },
+  rowContact: { backgroundColor: '#091520', borderLeftWidth: 3, borderLeftColor: '#00ccff' },
+  separator: { height: 1, backgroundColor: '#1a1a28', marginHorizontal: 12 },
 
   // círculo RSSI
   rssiCircle: {
@@ -225,8 +225,8 @@ const styles = StyleSheet.create({
   metaBell: { fontSize: 10 },
 
   // estrella
-  starBtn: { padding: 8, marginLeft: 4, backgroundColor: '#1a1a2a', borderRadius: 20, width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
-  starIcon: { fontSize: 22, color: '#446644' },
+  starBtn: { width: 42, height: 42, marginLeft: 6, borderRadius: 21, backgroundColor: '#1a1a2e', alignItems: 'center', justifyContent: 'center' },
+  starIcon: { fontSize: 24, color: '#557755' },
 
   empty: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   emptyText: { color: DIMGREEN, fontSize: 13, fontFamily: MONO, letterSpacing: 2 },

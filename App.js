@@ -462,10 +462,7 @@ export default function App() {
   const [backgroundActive, setBackgroundActive] = useState(false);
   const [registerModal, setRegisterModal] = useState(false);
   const scanRef = useRef(false);
-  const deviceOrderRef = useRef([]);
-  const bgScanRef = useRef(false);
-  const bgTimerRef = useRef(null);
-  const appStateRef = useRef(AppState.currentState); // orden de aparición fijo
+  const deviceOrderRef = useRef([]); // orden de aparición fijo
   const sweepAngle = useRef(new Animated.Value(0)).current;
   const sweepAnim = useRef(null);
   const prevTrendRef = useRef('estable');
@@ -788,19 +785,10 @@ export default function App() {
   }, [scanning, devices, contacts]);
 
   // ── render ────────────────────────────────────────────────────────────────
-  // lista completa en orden de aparición — va a ScanScreen
+  // lista en orden de aparición (nunca se reordena, nunca se borra)
   const deviceList = deviceOrderRef.current
     .map(id => devices.get(id))
     .filter(Boolean);
-
-  // radar solo muestra contactos guardados (más matchedContactId)
-  const radarDevices = new Map(
-    [...devices.entries()].filter(([id, dev]) => {
-      if (contacts[id]) return true;
-      if (dev.matchedContactId && contacts[dev.matchedContactId]) return true;
-      return false;
-    })
-  );
   const count = deviceList.length;
   const contactCount = Object.keys(contacts).length;
   const alertContactCount = Object.values(contacts).filter(c => c.alertEnabled).length;
@@ -819,7 +807,7 @@ export default function App() {
       </View>
 
       <View style={styles.radarWrapper}>
-        <RadarDisplay devices={radarDevices} trackedId={trackedId} sweepAngle={sweepAngle} contacts={contacts} />
+        <RadarDisplay devices={devices} trackedId={trackedId} sweepAngle={sweepAngle} contacts={contacts} />
         {!scanning && !backgroundActive && (
           <View style={[styles.radarOverlay, {borderRadius:RADAR_R}]}>
             <Text style={styles.radarOffText}>OFFLINE</Text>
