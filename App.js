@@ -118,7 +118,8 @@ const OUI = {
 function resolveDevice(id, advertisedName) {
   const mac = id.replace(/-/g, ':').toUpperCase();
   const oui = mac.substring(0, 8);
-  const tail = mac.slice(-4).toUpperCase(); // últimos 4 hex
+  const tail = mac.slice(-4).toUpperCase();
+  const fullMac = mac.length >= 17 ? mac.slice(-17) : mac;
   const ouiEntry = OUI[oui];
   const firstByte = parseInt(mac.split(':')[0] || '0', 16);
   const isRandom = !!(firstByte & 0x02);
@@ -126,11 +127,11 @@ function resolveDevice(id, advertisedName) {
   let displayName = advertisedName;
   if (!displayName || displayName.startsWith('DEV-') || displayName.startsWith('[')) {
     if (ouiEntry) {
-      displayName = `${ouiEntry.icon} ${ouiEntry.abbr}·${tail}`;
+      displayName = `${ouiEntry.icon} ${ouiEntry.abbr} ${fullMac}`;
     } else if (isRandom) {
-      displayName = `🔀·${tail}`;
+      displayName = `🔀 ${fullMac}`;
     } else {
-      displayName = `·${tail}`;
+      displayName = fullMac;
     }
   }
 
@@ -138,7 +139,7 @@ function resolveDevice(id, advertisedName) {
     ? `${ouiEntry.icon} ${ouiEntry.label}`
     : isRandom ? '🔀 Random/Priv' : '';
 
-  return { displayName, ouiLabel, ouiEntry, tail, isRandom };
+  return { displayName, ouiLabel, ouiEntry, tail, fullMac, isRandom };
 }
 
 // ── Audio beep ────────────────────────────────────────────────────────────────
@@ -554,7 +555,7 @@ export default function App() {
     setRegisterModal(false);
     const displayDev = {
       id: dev.id,
-      name: dev.name || nameCache[dev.id] || `DEV·${dev.id.slice(-4).toUpperCase()}`,
+      name: dev.name || nameCache[dev.id] || dev.id.slice(-17),
       rssi: dev.rssi,
       rssiHistory: [dev.rssi],
     };
