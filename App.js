@@ -1,12 +1,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
-  View, Text, TouchableOpacity, ScrollView, StyleSheet,
-  Animated, Alert, Platform, PermissionsAndroid, Dimensions,
+  View, Text, TouchableOpacity, ScrollView, StyleSheet, TextInput,
+  Animated, Alert, Platform, PermissionsAndroid, Dimensions, Modal,
 } from 'react-native';
 import { BleManager } from 'react-native-ble-plx';
 import * as Haptics from 'expo-haptics';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { Audio } from 'expo-av';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const { width } = Dimensions.get('window');
 const RADAR_SIZE = width * 0.85;
@@ -15,6 +16,11 @@ const RSSI_MIN = -100;
 const RSSI_MAX = -45;
 const HISTORY_SIZE = 10;
 const SCAN_INTERVAL = 1200;
+const CONTACTS_KEY = 'aliens_contacts';
+const MONO = Platform.OS === 'ios' ? 'Courier' : 'monospace';
+const GREEN = '#00ff41';
+const DIMGREEN = '#00551a';
+const BG = '#000d00';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 function rssiToPercent(rssi) {
@@ -45,76 +51,51 @@ function rssiToRadarPos(pct, angleRad) {
   return { x: RADAR_R + dist * Math.cos(angleRad), y: RADAR_R + dist * Math.sin(angleRad) };
 }
 
-// ── Audio engine: genera pitidos con Web Audio via expo-av HTML trick ──────────
-// Usamos expo-av con un buffer PCM generado en JS para el beep característico
+// ── Audio beep ────────────────────────────────────────────────────────────────
 function generateBeepWav(frequency = 880, durationMs = 80, volume = 0.8) {
   const sampleRate = 22050;
   const numSamples = Math.floor(sampleRate * durationMs / 1000);
   const buffer = new ArrayBuffer(44 + numSamples * 2);
   const view = new DataView(buffer);
-
-  // WAV header
   const writeStr = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
   writeStr(0, 'RIFF');
   view.setUint32(4, 36 + numSamples * 2, true);
-  writeStr(8, 'WAVE');
-  writeStr(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeStr(36, 'data');
+  writeStr(8, 'WAVE'); writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true); writeStr(36, 'data');
   view.setUint32(40, numSamples * 2, true);
-
-  // PCM samples — tono con envelope ADSR rápido
   for (let i = 0; i < numSamples; i++) {
-    const t = i / sampleRate;
     const attack = Math.min(1, i / (sampleRate * 0.005));
     const release = Math.max(0, 1 - (i - numSamples * 0.7) / (numSamples * 0.3));
-    const envelope = attack * release;
-    const sample = Math.sin(2 * Math.PI * frequency * t) * volume * envelope;
+    const sample = Math.sin(2 * Math.PI * frequency * (i / sampleRate)) * volume * attack * release;
     view.setInt16(44 + i * 2, Math.max(-32768, Math.min(32767, sample * 32767)), true);
   }
-
-  // Convertir a base64
   const bytes = new Uint8Array(buffer);
   let binary = '';
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   return 'data:audio/wav;base64,' + btoa(binary);
 }
 
-// ── useTrackerSound: pitidos estilo Aliens ─────────────────────────────────────
 function useTrackerSound(trackedDevice, scanning) {
-  const soundRef = useRef(null);
   const timerRef = useRef(null);
   const activeRef = useRef(false);
 
   const stopBeeps = useCallback(() => {
     activeRef.current = false;
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
-    if (soundRef.current) { soundRef.current.unloadAsync(); soundRef.current = null; }
   }, []);
 
   const scheduleBeep = useCallback(async (pct) => {
     if (!activeRef.current) return;
     try {
-      // frecuencia sube con proximidad: 600Hz lejos → 1400Hz cerca
       const freq = 600 + Math.round(pct * 800);
-      // duración del pitido: 60ms lejos → 90ms cerca
       const dur = 60 + Math.round(pct * 30);
-      // volumen sube con proximidad
       const vol = 0.3 + pct * 0.7;
-      // intervalo entre pitidos: 2000ms lejos → 120ms cerca
       const interval = Math.max(120, 2000 - Math.round(pct * 1880));
-
-      const uri = generateBeepWav(freq, dur, vol);
-      const { sound } = await Audio.Sound.createAsync({ uri }, { volume: vol });
-      soundRef.current = sound;
+      const { sound } = await Audio.Sound.createAsync({ uri: generateBeepWav(freq, dur, vol) }, { volume: vol });
       await sound.playAsync();
-
       timerRef.current = setTimeout(async () => {
         try { await sound.unloadAsync(); } catch {}
         if (activeRef.current) scheduleBeep(pct);
@@ -124,23 +105,17 @@ function useTrackerSound(trackedDevice, scanning) {
 
   useEffect(() => {
     if (!scanning || !trackedDevice) { stopBeeps(); return; }
-    Audio.setAudioModeAsync({ playsInSilentModeIOS: true, staysActiveInBackground: false });
+    Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
     activeRef.current = true;
     scheduleBeep(trackedDevice.percent);
     return stopBeeps;
   }, [trackedDevice?.id, scanning]);
 
-  // actualizar cadencia sin reiniciar cuando cambia el porcentaje
-  useEffect(() => {
-    if (!trackedDevice || !activeRef.current) return;
-    // el scheduleBeep usa el pct en closure, se auto-actualiza en el siguiente ciclo
-  }, [trackedDevice?.percent]);
-
   return stopBeeps;
 }
 
-// ── Radar ──────────────────────────────────────────────────────────────────────
-function RadarDisplay({ devices, trackedId, sweepAngle }) {
+// ── Radar ─────────────────────────────────────────────────────────────────────
+function RadarDisplay({ devices, trackedId, sweepAngle, contacts }) {
   const rings = [0.25, 0.5, 0.75, 1.0];
   return (
     <View style={[styles.radarContainer, { width: RADAR_SIZE, height: RADAR_SIZE }]}>
@@ -149,8 +124,7 @@ function RadarDisplay({ devices, trackedId, sweepAngle }) {
         <View key={i} style={[styles.radarRing, {
           width: RADAR_SIZE * r, height: RADAR_SIZE * r,
           borderRadius: RADAR_SIZE * r / 2,
-          left: RADAR_R - RADAR_SIZE * r / 2,
-          top: RADAR_R - RADAR_SIZE * r / 2,
+          left: RADAR_R - RADAR_SIZE * r / 2, top: RADAR_R - RADAR_SIZE * r / 2,
         }]} />
       ))}
       <View style={[styles.radarLine, { width: RADAR_SIZE, height: 1, top: RADAR_R - 0.5, left: 0 }]} />
@@ -164,14 +138,24 @@ function RadarDisplay({ devices, trackedId, sweepAngle }) {
         const angle = strToAngle(dev.id);
         const pos = rssiToRadarPos(pct, angle);
         const isTracked = dev.id === trackedId;
-        const blipSize = isTracked ? 14 : 9;
+        const contact = contacts[dev.id];
+        const isContact = !!contact;
+        const blipSize = isTracked ? 14 : isContact ? 12 : 8;
+        const blipColor = isTracked ? '#00ff41' : isContact ? '#00ccff' : '#00cc33';
         return (
-          <View key={dev.id} style={[styles.blip, {
-            width: blipSize, height: blipSize, borderRadius: blipSize / 2,
-            left: pos.x - blipSize / 2, top: pos.y - blipSize / 2,
-            backgroundColor: isTracked ? '#00ff41' : '#00cc33',
-            shadowColor: '#00ff41', shadowOpacity: isTracked ? 1 : 0.5, shadowRadius: isTracked ? 10 : 4,
-          }]} />
+          <View key={dev.id}>
+            <View style={[styles.blip, {
+              width: blipSize, height: blipSize, borderRadius: blipSize / 2,
+              left: pos.x - blipSize / 2, top: pos.y - blipSize / 2,
+              backgroundColor: blipColor,
+              shadowColor: blipColor, shadowOpacity: 0.9, shadowRadius: isTracked ? 10 : 5,
+            }]} />
+            {isContact && (
+              <Text style={[styles.blipLabel, { left: pos.x + 6, top: pos.y - 8 }]}>
+                {contact.alias.slice(0, 6)}
+              </Text>
+            )}
+          </View>
         );
       })}
       <Text style={[styles.radarLabel, { top: RADAR_R - RADAR_SIZE*0.25/2 - 13, left: RADAR_R + 4 }]}>~5m</Text>
@@ -181,7 +165,131 @@ function RadarDisplay({ devices, trackedId, sweepAngle }) {
   );
 }
 
-// ── App ────────────────────────────────────────────────────────────────────────
+// ── Modal guardar contacto ─────────────────────────────────────────────────────
+function SaveContactModal({ visible, device, existingContact, onSave, onDelete, onClose }) {
+  const [alias, setAlias] = useState('');
+  const [alertEnabled, setAlertEnabled] = useState(true);
+
+  useEffect(() => {
+    if (visible) {
+      setAlias(existingContact?.alias || device?.name || '');
+      setAlertEnabled(existingContact?.alertEnabled ?? true);
+    }
+  }, [visible, existingContact, device]);
+
+  if (!device) return null;
+
+  return (
+    <Modal visible={visible} transparent animationType="fade">
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalBox}>
+          <Text style={styles.modalTitle}>
+            {existingContact ? '[ EDITAR CONTACTO ]' : '[ GUARDAR CONTACTO ]'}
+          </Text>
+          <Text style={styles.modalDevId} numberOfLines={1}>{device.id}</Text>
+          <Text style={styles.modalDevName} numberOfLines={1}>Dispositivo: {device.name}</Text>
+
+          <Text style={styles.modalLabel}>NOMBRE / ALIAS</Text>
+          <TextInput
+            style={styles.modalInput}
+            value={alias}
+            onChangeText={setAlias}
+            placeholder="ej: Mamá, Juan, Hijo..."
+            placeholderTextColor="#004410"
+            maxLength={20}
+            autoFocus
+          />
+
+          <TouchableOpacity
+            style={[styles.modalToggle, alertEnabled && styles.modalToggleOn]}
+            onPress={() => setAlertEnabled(v => !v)}
+          >
+            <Text style={[styles.modalToggleText, alertEnabled && { color: GREEN }]}>
+              {alertEnabled ? '🔔 ALERTA PROXIMIDAD: ON' : '🔕 ALERTA PROXIMIDAD: OFF'}
+            </Text>
+          </TouchableOpacity>
+          {alertEnabled && (
+            <Text style={styles.modalHint}>
+              Sonará cuando este contacto esté cerca
+            </Text>
+          )}
+
+          <View style={styles.modalButtons}>
+            {existingContact && (
+              <TouchableOpacity style={styles.modalBtnDelete} onPress={() => onDelete(device.id)}>
+                <Text style={styles.modalBtnDeleteText}>[ BORRAR ]</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity style={styles.modalBtnCancel} onPress={onClose}>
+              <Text style={styles.modalBtnCancelText}>[ CANCELAR ]</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.modalBtnSave, !alias.trim() && { opacity: 0.4 }]}
+              onPress={() => alias.trim() && onSave(device.id, alias.trim(), alertEnabled)}
+              disabled={!alias.trim()}
+            >
+              <Text style={styles.modalBtnSaveText}>[ GUARDAR ]</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ── Modal lista de contactos ───────────────────────────────────────────────────
+function ContactsListModal({ visible, contacts, devices, onEdit, onClose, onTrack }) {
+  const entries = Object.values(contacts);
+  return (
+    <Modal visible={visible} transparent animationType="slide">
+      <View style={styles.modalOverlay}>
+        <View style={[styles.modalBox, { maxHeight: '80%' }]}>
+          <Text style={styles.modalTitle}>[ CONTACTOS GUARDADOS ]</Text>
+          {entries.length === 0 ? (
+            <Text style={styles.modalEmpty}>Sin contactos aún.{'\n'}Escanea y toca un dispositivo para guardar.</Text>
+          ) : (
+            <ScrollView>
+              {entries.map(c => {
+                const online = !!devices.get(c.id);
+                const dev = devices.get(c.id);
+                const pct = dev ? rssiToPercent(avg(dev.rssiHistory)) : 0;
+                return (
+                  <View key={c.id} style={styles.contactRow}>
+                    <View style={[styles.contactDot, { backgroundColor: online ? GREEN : '#333' }]} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.contactAlias}>{c.alias}</Text>
+                      <Text style={styles.contactSub} numberOfLines={1}>
+                        {c.id.slice(-17)}  {c.alertEnabled ? '🔔' : '🔕'}
+                      </Text>
+                      {online && (
+                        <Text style={[styles.contactDist, { color: pct > 0.6 ? GREEN : pct > 0.35 ? '#ffaa00' : '#ff4444' }]}>
+                          {rssiToDistance(avg(dev.rssiHistory))}  {Math.round(avg(dev.rssiHistory))} dBm
+                        </Text>
+                      )}
+                    </View>
+                    {online && (
+                      <TouchableOpacity style={styles.contactTrack} onPress={() => { onTrack(c.id); onClose(); }}>
+                        <Text style={styles.contactTrackText}>RASTREAR</Text>
+                      </TouchableOpacity>
+                    )}
+                    <TouchableOpacity style={styles.contactEdit} onPress={() => onEdit(c.id)}>
+                      <Text style={styles.contactEditText}>EDITAR</Text>
+                    </TouchableOpacity>
+                  </View>
+                );
+              })}
+            </ScrollView>
+          )}
+          <TouchableOpacity style={styles.modalBtnCancel} onPress={onClose}>
+            <Text style={styles.modalBtnCancelText}>[ CERRAR ]</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ── App principal ─────────────────────────────────────────────────────────────
 export default function App() {
   const manager = useRef(null);
   const [scanning, setScanning] = useState(false);
@@ -190,13 +298,65 @@ export default function App() {
   const [trackedDevice, setTrackedDevice] = useState(null);
   const [permissionsOk, setPermissionsOk] = useState(false);
   const [showList, setShowList] = useState(false);
+  const [contacts, setContacts] = useState({});
+  const [saveModal, setSaveModal] = useState({ visible: false, device: null });
+  const [contactsModal, setContactsModal] = useState(false);
   const scanRef = useRef(false);
   const sweepAngle = useRef(new Animated.Value(0)).current;
   const sweepAnim = useRef(null);
   const prevTrendRef = useRef('estable');
+  const alertTimerRef = useRef(null);
 
   useTrackerSound(trackedDevice, scanning);
 
+  // ── cargar contactos ────────────────────────────────────────────────────────
+  useEffect(() => {
+    AsyncStorage.getItem(CONTACTS_KEY).then(val => {
+      if (val) setContacts(JSON.parse(val));
+    });
+  }, []);
+
+  const saveContacts = useCallback(async (updated) => {
+    setContacts(updated);
+    await AsyncStorage.setItem(CONTACTS_KEY, JSON.stringify(updated));
+  }, []);
+
+  const handleSaveContact = useCallback((id, alias, alertEnabled) => {
+    const dev = devices.get(id);
+    const updated = {
+      ...contacts,
+      [id]: { id, alias, alertEnabled, name: dev?.name || id },
+    };
+    saveContacts(updated);
+    setSaveModal({ visible: false, device: null });
+  }, [contacts, devices, saveContacts]);
+
+  const handleDeleteContact = useCallback((id) => {
+    const updated = { ...contacts };
+    delete updated[id];
+    saveContacts(updated);
+    setSaveModal({ visible: false, device: null });
+  }, [contacts, saveContacts]);
+
+  // ── alerta de proximidad para contactos con alertEnabled ───────────────────
+  useEffect(() => {
+    if (!scanning) return;
+    const interval = setInterval(() => {
+      for (const [id, dev] of devices) {
+        const contact = contacts[id];
+        if (!contact?.alertEnabled) continue;
+        const pct = rssiToPercent(avg(dev.rssiHistory));
+        if (pct > 0.55) {
+          // vibración adicional para contactos cerca
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+          break;
+        }
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [scanning, devices, contacts]);
+
+  // ── permisos ────────────────────────────────────────────────────────────────
   const requestPermissions = async () => {
     if (Platform.OS !== 'android') { setPermissionsOk(true); return; }
     try {
@@ -218,6 +378,7 @@ export default function App() {
     return () => { manager.current?.destroy(); deactivateKeepAwake(); };
   }, []);
 
+  // ── sweep animation ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (scanning) {
       sweepAngle.setValue(0);
@@ -225,12 +386,11 @@ export default function App() {
         Animated.timing(sweepAngle, { toValue: 1, duration: 2500, useNativeDriver: false })
       );
       sweepAnim.current.start();
-    } else {
-      sweepAnim.current?.stop();
-    }
+    } else { sweepAnim.current?.stop(); }
     return () => sweepAnim.current?.stop();
   }, [scanning]);
 
+  // ── BLE scan ────────────────────────────────────────────────────────────────
   const startScan = useCallback(() => {
     if (!manager.current || !permissionsOk) return;
     scanRef.current = true;
@@ -244,8 +404,7 @@ export default function App() {
           const next = new Map(prev);
           const existing = next.get(device.id);
           const history = existing
-            ? [...existing.rssiHistory.slice(-(HISTORY_SIZE - 1)), rssi]
-            : [rssi];
+            ? [...existing.rssiHistory.slice(-(HISTORY_SIZE - 1)), rssi] : [rssi];
           next.set(device.id, {
             id: device.id,
             name: device.name || device.localName || `DEV-${device.id.slice(-4).toUpperCase()}`,
@@ -272,6 +431,7 @@ export default function App() {
     setDevices(new Map());
   }, []);
 
+  // ── tracked device ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!trackedId) { setTrackedDevice(null); return; }
     const dev = devices.get(trackedId);
@@ -284,6 +444,7 @@ export default function App() {
     setTrackedDevice({ ...dev, avgRssi, percent: rssiToPercent(avgRssi), distance: rssiToDistance(avgRssi), trend: t });
   }, [devices, trackedId]);
 
+  // ── limpiar viejos ──────────────────────────────────────────────────────────
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
@@ -298,20 +459,25 @@ export default function App() {
 
   const deviceList = Array.from(devices.values()).sort((a, b) => b.rssi - a.rssi);
   const count = deviceList.length;
+  const contactCount = Object.keys(contacts).length;
+  const contactsOnline = Object.values(contacts).filter(c => devices.has(c.id)).length;
   const trendColor = !trackedDevice ? GREEN :
-    trackedDevice.trend === 'acercando' ? '#00ff41' :
+    trackedDevice.trend === 'acercando' ? GREEN :
     trackedDevice.trend === 'alejando' ? '#ff4444' : '#ffaa00';
+  const trackedContact = trackedId ? contacts[trackedId] : null;
 
   return (
     <View style={styles.root}>
+      {/* cabecera */}
       <View style={styles.header}>
         <Text style={styles.headerModel}>MU-TH-UR 6000</Text>
         <Text style={styles.headerTitle}>MOTION TRACKER</Text>
         <View style={styles.headerLine} />
       </View>
 
+      {/* radar */}
       <View style={styles.radarWrapper}>
-        <RadarDisplay devices={devices} trackedId={trackedId} sweepAngle={sweepAngle} />
+        <RadarDisplay devices={devices} trackedId={trackedId} sweepAngle={sweepAngle} contacts={contacts} />
         {!scanning && (
           <View style={[styles.radarOverlay, { borderRadius: RADAR_R }]}>
             <Text style={styles.radarOffText}>OFFLINE</Text>
@@ -319,13 +485,19 @@ export default function App() {
         )}
       </View>
 
+      {/* info panel */}
       <View style={styles.infoPanel}>
         {trackedDevice ? (
           <>
             <View style={styles.infoPanelRow}>
               <View style={styles.infoCol}>
                 <Text style={styles.infoKey}>TARGET</Text>
-                <Text style={styles.infoVal} numberOfLines={1}>{trackedDevice.name}</Text>
+                <Text style={styles.infoVal} numberOfLines={1}>
+                  {trackedContact ? trackedContact.alias : trackedDevice.name}
+                </Text>
+                {trackedContact && (
+                  <Text style={styles.infoSubVal} numberOfLines={1}>{trackedDevice.name}</Text>
+                )}
               </View>
               <View style={styles.infoCol}>
                 <Text style={styles.infoKey}>DIST</Text>
@@ -342,19 +514,34 @@ export default function App() {
                 backgroundColor: trackedDevice.percent > 0.6 ? GREEN : trackedDevice.percent > 0.35 ? '#ffaa00' : '#ff4444',
               }]} />
             </View>
-            <Text style={[styles.trendText, { color: trendColor }]}>
-              {trackedDevice.trend === 'acercando' && '▲  ACERCÁNDOSE'}
-              {trackedDevice.trend === 'alejando' && '▼  ALEJÁNDOSE'}
-              {trackedDevice.trend === 'estable' && '●  POSICIÓN ESTABLE'}
-            </Text>
+            <View style={styles.trendRow}>
+              <Text style={[styles.trendText, { color: trendColor }]}>
+                {trackedDevice.trend === 'acercando' && '▲  ACERCÁNDOSE'}
+                {trackedDevice.trend === 'alejando' && '▼  ALEJÁNDOSE'}
+                {trackedDevice.trend === 'estable' && '●  POSICIÓN ESTABLE'}
+              </Text>
+              <TouchableOpacity
+                style={styles.btnSaveInline}
+                onPress={() => setSaveModal({ visible: true, device: trackedDevice })}
+              >
+                <Text style={styles.btnSaveInlineText}>
+                  {contacts[trackedId] ? '✎ EDITAR' : '＋ GUARDAR'}
+                </Text>
+              </TouchableOpacity>
+            </View>
           </>
         ) : (
-          <Text style={styles.infoIdle}>
-            {scanning ? `${count} SEÑALES DETECTADAS — SELECCIONA UN OBJETIVO` : 'SISTEMA EN ESPERA'}
-          </Text>
+          <View>
+            <Text style={styles.infoIdle}>
+              {scanning
+                ? `${count} SEÑALES  ·  ${contactsOnline}/${contactCount} CONTACTOS ONLINE`
+                : 'SISTEMA EN ESPERA'}
+            </Text>
+          </View>
         )}
       </View>
 
+      {/* controles */}
       <View style={styles.controls}>
         <TouchableOpacity
           style={[styles.btnMain, scanning && styles.btnMainActive]}
@@ -365,107 +552,189 @@ export default function App() {
             {!permissionsOk ? 'SIN PERMISOS' : scanning ? '[ APAGAR ]' : '[ ACTIVAR ]'}
           </Text>
         </TouchableOpacity>
-        {scanning && count > 0 && (
-          <TouchableOpacity style={styles.btnSecondary} onPress={() => setShowList(v => !v)}>
-            <Text style={styles.btnSecondaryText}>{showList ? '[ RADAR ]' : `[ ${count} SEÑALES ]`}</Text>
-          </TouchableOpacity>
-        )}
-        {trackedId && (
-          <TouchableOpacity style={styles.btnCancel} onPress={() => setTrackedId(null)}>
-            <Text style={styles.btnCancelText}>[ SOLTAR ]</Text>
-          </TouchableOpacity>
-        )}
+
+        <TouchableOpacity
+          style={[styles.btnContacts, contactsOnline > 0 && styles.btnContactsActive]}
+          onPress={() => setContactsModal(true)}
+        >
+          <Text style={[styles.btnContactsText, contactsOnline > 0 && { color: '#00ccff' }]}>
+            {contactCount > 0 ? `[ ${contactsOnline > 0 ? '●' : '○'} ${contactCount} ]` : '[ LISTA ]'}
+          </Text>
+        </TouchableOpacity>
       </View>
 
+      {/* segunda fila controles */}
+      {scanning && (
+        <View style={styles.controls}>
+          {count > 0 && (
+            <TouchableOpacity style={styles.btnSecondary} onPress={() => setShowList(v => !v)}>
+              <Text style={styles.btnSecondaryText}>{showList ? '[ RADAR ]' : `[ ${count} SEÑALES ]`}</Text>
+            </TouchableOpacity>
+          )}
+          {trackedId && (
+            <TouchableOpacity style={styles.btnCancel} onPress={() => setTrackedId(null)}>
+              <Text style={styles.btnCancelText}>[ SOLTAR ]</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
+
+      {/* lista */}
       {showList && scanning && (
         <ScrollView style={styles.list} contentContainerStyle={{ paddingBottom: 20 }}>
           {deviceList.map(dev => {
             const pct = rssiToPercent(avg(dev.rssiHistory));
             const isTracked = dev.id === trackedId;
+            const contact = contacts[dev.id];
+            const barColor = pct > 0.6 ? GREEN : pct > 0.35 ? '#ffaa00' : '#ff4444';
             return (
               <TouchableOpacity key={dev.id}
-                style={[styles.devRow, isTracked && styles.devRowActive]}
+                style={[styles.devRow, isTracked && styles.devRowActive, contact && styles.devRowContact]}
                 onPress={() => { setTrackedId(dev.id); setShowList(false); }}
+                onLongPress={() => setSaveModal({ visible: true, device: dev })}
               >
                 <View style={styles.devBarBg}>
-                  <View style={[styles.devBarFill, {
-                    width: `${Math.round(pct * 100)}%`,
-                    backgroundColor: pct > 0.6 ? GREEN : pct > 0.35 ? '#ffaa00' : '#ff4444',
-                  }]} />
+                  <View style={[styles.devBarFill, { width: `${Math.round(pct * 100)}%`, backgroundColor: barColor }]} />
                 </View>
-                <Text style={styles.devName} numberOfLines={1}>{dev.name}</Text>
-                <Text style={[styles.devRssi, { color: pct > 0.6 ? GREEN : pct > 0.35 ? '#ffaa00' : '#ff4444' }]}>
-                  {dev.rssi} dBm
-                </Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.devName, contact && { color: '#00ccff' }]} numberOfLines={1}>
+                    {contact ? contact.alias : dev.name}
+                  </Text>
+                  {contact && <Text style={styles.devSubName} numberOfLines={1}>{dev.name}</Text>}
+                </View>
+                <Text style={styles.devBadge}>{contact?.alertEnabled ? '🔔' : ''}</Text>
+                <Text style={[styles.devRssi, { color: barColor }]}>{dev.rssi} dBm</Text>
               </TouchableOpacity>
             );
           })}
+          <Text style={styles.listHint}>Manten presionado para guardar contacto</Text>
         </ScrollView>
       )}
 
       <View style={styles.footer}>
-        <Text style={styles.footerText}>WEYLAND-YUTANI CORP  ·  UNIT 0{Math.floor(Math.random() * 9 + 1)}</Text>
+        <Text style={styles.footerText}>WEYLAND-YUTANI CORP  ·  v2.0</Text>
       </View>
+
+      {/* modales */}
+      <SaveContactModal
+        visible={saveModal.visible}
+        device={saveModal.device}
+        existingContact={saveModal.device ? contacts[saveModal.device.id] : null}
+        onSave={handleSaveContact}
+        onDelete={handleDeleteContact}
+        onClose={() => setSaveModal({ visible: false, device: null })}
+      />
+      <ContactsListModal
+        visible={contactsModal}
+        contacts={contacts}
+        devices={devices}
+        onEdit={(id) => {
+          const dev = devices.get(id) || { id, name: contacts[id]?.name || id };
+          setContactsModal(false);
+          setSaveModal({ visible: true, device: dev });
+        }}
+        onClose={() => setContactsModal(false)}
+        onTrack={(id) => { setTrackedId(id); setContactsModal(false); }}
+      />
     </View>
   );
 }
 
 // ── estilos ────────────────────────────────────────────────────────────────────
-const GREEN = '#00ff41';
-const DIMGREEN = '#00551a';
-const BG = '#000d00';
-const MONO = Platform.OS === 'ios' ? 'Courier' : 'monospace';
-
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: BG, paddingTop: 44, paddingHorizontal: 12 },
   header: { alignItems: 'center', marginBottom: 8 },
   headerModel: { color: DIMGREEN, fontSize: 10, letterSpacing: 6, fontFamily: MONO },
   headerTitle: { color: GREEN, fontSize: 20, fontWeight: 'bold', letterSpacing: 8, fontFamily: MONO },
   headerLine: { width: '100%', height: 1, backgroundColor: DIMGREEN, marginTop: 6 },
-  radarWrapper: { alignItems: 'center', marginVertical: 8, position: 'relative' },
+
+  radarWrapper: { alignItems: 'center', marginVertical: 6, position: 'relative' },
   radarContainer: { position: 'relative' },
   radarBg: { position: 'absolute', width: '100%', height: '100%', backgroundColor: BG },
   radarRing: { position: 'absolute', borderWidth: 1, borderColor: '#003310' },
   radarLine: { position: 'absolute', backgroundColor: '#003310' },
-  sweepLine: {
-    position: 'absolute', height: 2, backgroundColor: GREEN, opacity: 0.85,
-    shadowColor: GREEN, shadowOpacity: 1, shadowRadius: 10,
-  },
+  sweepLine: { position: 'absolute', height: 2, backgroundColor: GREEN, opacity: 0.85, shadowColor: GREEN, shadowOpacity: 1, shadowRadius: 10 },
   blip: { position: 'absolute', elevation: 5 },
+  blipLabel: { position: 'absolute', color: '#00ccff', fontSize: 7, fontFamily: MONO },
   radarLabel: { position: 'absolute', color: '#005520', fontSize: 8, fontFamily: MONO },
-  radarOverlay: {
-    position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
-    alignItems: 'center', justifyContent: 'center', backgroundColor: '#000d00cc',
-  },
+  radarOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', backgroundColor: '#000d00cc' },
   radarOffText: { color: '#ff4444', fontSize: 18, letterSpacing: 6, fontFamily: MONO },
-  infoPanel: {
-    borderWidth: 1, borderColor: DIMGREEN, borderRadius: 6,
-    padding: 10, marginBottom: 10, backgroundColor: '#00080050', minHeight: 70,
-  },
-  infoPanelRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
+
+  infoPanel: { borderWidth: 1, borderColor: DIMGREEN, borderRadius: 6, padding: 10, marginBottom: 8, backgroundColor: '#00080050', minHeight: 65 },
+  infoPanelRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
   infoCol: { flex: 1, alignItems: 'center' },
   infoKey: { color: '#005520', fontSize: 8, letterSpacing: 2, fontFamily: MONO },
   infoVal: { color: GREEN, fontSize: 11, fontFamily: MONO },
+  infoSubVal: { color: '#005520', fontSize: 9, fontFamily: MONO },
   infoValLg: { fontSize: 15, fontWeight: 'bold', fontFamily: MONO },
-  signalBarBg: { height: 6, backgroundColor: '#001a00', borderRadius: 3, overflow: 'hidden', marginBottom: 6 },
+  signalBarBg: { height: 5, backgroundColor: '#001a00', borderRadius: 3, overflow: 'hidden', marginBottom: 5 },
   signalBarFill: { height: '100%', borderRadius: 3 },
-  trendText: { textAlign: 'center', fontSize: 11, letterSpacing: 3, fontFamily: MONO },
+  trendRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  trendText: { fontSize: 11, letterSpacing: 2, fontFamily: MONO },
+  btnSaveInline: { borderWidth: 1, borderColor: '#005520', borderRadius: 4, paddingHorizontal: 8, paddingVertical: 2 },
+  btnSaveInlineText: { color: '#00aa33', fontSize: 9, fontFamily: MONO },
   infoIdle: { color: '#005520', fontSize: 11, textAlign: 'center', letterSpacing: 2, fontFamily: MONO, paddingVertical: 8 },
-  controls: { flexDirection: 'row', gap: 8, marginBottom: 8 },
-  btnMain: { flex: 1, borderWidth: 1, borderColor: GREEN, borderRadius: 4, paddingVertical: 12, alignItems: 'center' },
+
+  controls: { flexDirection: 'row', gap: 8, marginBottom: 6 },
+  btnMain: { flex: 2, borderWidth: 1, borderColor: GREEN, borderRadius: 4, paddingVertical: 11, alignItems: 'center' },
   btnMainActive: { borderColor: '#ff4444' },
   btnMainText: { color: GREEN, fontSize: 13, letterSpacing: 3, fontFamily: MONO },
-  btnSecondary: { flex: 1, borderWidth: 1, borderColor: '#ffaa00', borderRadius: 4, paddingVertical: 12, alignItems: 'center' },
-  btnSecondaryText: { color: '#ffaa00', fontSize: 11, letterSpacing: 2, fontFamily: MONO },
-  btnCancel: { flex: 1, borderWidth: 1, borderColor: '#ff4444', borderRadius: 4, paddingVertical: 12, alignItems: 'center' },
-  btnCancelText: { color: '#ff4444', fontSize: 11, letterSpacing: 2, fontFamily: MONO },
+  btnContacts: { flex: 1, borderWidth: 1, borderColor: DIMGREEN, borderRadius: 4, paddingVertical: 11, alignItems: 'center' },
+  btnContactsActive: { borderColor: '#00ccff' },
+  btnContactsText: { color: DIMGREEN, fontSize: 12, letterSpacing: 1, fontFamily: MONO },
+  btnSecondary: { flex: 1, borderWidth: 1, borderColor: '#ffaa00', borderRadius: 4, paddingVertical: 10, alignItems: 'center' },
+  btnSecondaryText: { color: '#ffaa00', fontSize: 11, letterSpacing: 1, fontFamily: MONO },
+  btnCancel: { flex: 1, borderWidth: 1, borderColor: '#ff4444', borderRadius: 4, paddingVertical: 10, alignItems: 'center' },
+  btnCancelText: { color: '#ff4444', fontSize: 11, letterSpacing: 1, fontFamily: MONO },
+
   list: { flex: 1 },
-  devRow: { flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, borderColor: '#001a00', paddingVertical: 8 },
+  devRow: { flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, borderColor: '#001a00', paddingVertical: 7 },
   devRowActive: { backgroundColor: '#001a00' },
-  devBarBg: { width: 60, height: 4, backgroundColor: '#001a00', borderRadius: 2, marginRight: 8, overflow: 'hidden' },
+  devRowContact: { borderLeftWidth: 2, borderLeftColor: '#00ccff', paddingLeft: 6 },
+  devBarBg: { width: 50, height: 4, backgroundColor: '#001a00', borderRadius: 2, marginRight: 8, overflow: 'hidden' },
   devBarFill: { height: '100%', borderRadius: 2 },
-  devName: { flex: 1, color: GREEN, fontSize: 11, fontFamily: MONO },
+  devName: { color: GREEN, fontSize: 11, fontFamily: MONO },
+  devSubName: { color: '#005520', fontSize: 9, fontFamily: MONO },
+  devBadge: { fontSize: 10, marginRight: 4 },
   devRssi: { fontSize: 11, fontFamily: MONO },
-  footer: { paddingVertical: 8, alignItems: 'center' },
+  listHint: { color: '#003310', fontSize: 9, textAlign: 'center', marginTop: 8, fontFamily: MONO },
+
+  footer: { paddingVertical: 6, alignItems: 'center' },
   footerText: { color: '#002a0a', fontSize: 8, letterSpacing: 3, fontFamily: MONO },
+
+  // modal
+  modalOverlay: { flex: 1, backgroundColor: '#000d00dd', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  modalBox: { backgroundColor: '#000f00', borderWidth: 1, borderColor: GREEN, borderRadius: 8, padding: 20, width: '100%' },
+  modalTitle: { color: GREEN, fontSize: 13, letterSpacing: 3, fontFamily: MONO, textAlign: 'center', marginBottom: 12 },
+  modalDevId: { color: '#003310', fontSize: 9, fontFamily: MONO, marginBottom: 2, textAlign: 'center' },
+  modalDevName: { color: '#005520', fontSize: 10, fontFamily: MONO, marginBottom: 14, textAlign: 'center' },
+  modalLabel: { color: DIMGREEN, fontSize: 9, letterSpacing: 2, fontFamily: MONO, marginBottom: 6 },
+  modalInput: {
+    borderWidth: 1, borderColor: DIMGREEN, borderRadius: 4,
+    color: GREEN, fontFamily: MONO, fontSize: 16,
+    paddingHorizontal: 12, paddingVertical: 8, marginBottom: 14,
+    backgroundColor: '#000d00',
+  },
+  modalToggle: { borderWidth: 1, borderColor: '#003310', borderRadius: 4, paddingVertical: 10, alignItems: 'center', marginBottom: 4 },
+  modalToggleOn: { borderColor: GREEN, backgroundColor: '#001a00' },
+  modalToggleText: { color: '#005520', fontSize: 12, fontFamily: MONO, letterSpacing: 1 },
+  modalHint: { color: '#005520', fontSize: 9, fontFamily: MONO, textAlign: 'center', marginBottom: 14 },
+  modalEmpty: { color: '#005520', fontSize: 11, fontFamily: MONO, textAlign: 'center', marginVertical: 20, lineHeight: 20 },
+  modalButtons: { flexDirection: 'row', gap: 8, marginTop: 14 },
+  modalBtnSave: { flex: 1, borderWidth: 1, borderColor: GREEN, borderRadius: 4, paddingVertical: 10, alignItems: 'center' },
+  modalBtnSaveText: { color: GREEN, fontSize: 11, fontFamily: MONO },
+  modalBtnCancel: { flex: 1, borderWidth: 1, borderColor: DIMGREEN, borderRadius: 4, paddingVertical: 10, alignItems: 'center', marginTop: 8 },
+  modalBtnCancelText: { color: DIMGREEN, fontSize: 11, fontFamily: MONO },
+  modalBtnDelete: { flex: 1, borderWidth: 1, borderColor: '#ff4444', borderRadius: 4, paddingVertical: 10, alignItems: 'center' },
+  modalBtnDeleteText: { color: '#ff4444', fontSize: 11, fontFamily: MONO },
+
+  contactRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderColor: '#001a00' },
+  contactDot: { width: 8, height: 8, borderRadius: 4, marginRight: 10 },
+  contactAlias: { color: '#00ccff', fontSize: 14, fontFamily: MONO },
+  contactSub: { color: '#005520', fontSize: 9, fontFamily: MONO, marginTop: 2 },
+  contactDist: { fontSize: 10, fontFamily: MONO, marginTop: 2 },
+  contactTrack: { borderWidth: 1, borderColor: GREEN, borderRadius: 4, paddingHorizontal: 8, paddingVertical: 4, marginRight: 6 },
+  contactTrackText: { color: GREEN, fontSize: 9, fontFamily: MONO },
+  contactEdit: { borderWidth: 1, borderColor: DIMGREEN, borderRadius: 4, paddingHorizontal: 8, paddingVertical: 4 },
+  contactEditText: { color: DIMGREEN, fontSize: 9, fontFamily: MONO },
 });
