@@ -2,9 +2,9 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, ScrollView, StyleSheet, TextInput,
   Animated, Alert, Platform, PermissionsAndroid, Dimensions, Modal,
-  ActivityIndicator, Switch,
+  ActivityIndicator, NativeEventEmitter, NativeModules,
 } from 'react-native';
-import { BleManager } from 'react-native-ble-plx';
+import BleManager from 'react-native-ble-manager';
 import * as Haptics from 'expo-haptics';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { Audio } from 'expo-av';
@@ -25,13 +25,15 @@ const RADAR_R = RADAR_SIZE / 2;
 const RSSI_MIN = -100;
 const RSSI_MAX = -45;
 const HISTORY_SIZE = 10;
-const SCAN_INTERVAL = 1200;
+const SCAN_SECONDS = 10; // ciclo de scan en segundos
 const CONTACTS_KEY = 'aliens_contacts';
 const NAME_CACHE_KEY = 'aliens_name_cache';
 const MONO = Platform.OS === 'ios' ? 'Courier' : 'monospace';
 const GREEN = '#00ff41';
 const DIMGREEN = '#00551a';
 const BG = '#000d00';
+
+const BleManagerEmitter = new NativeEventEmitter(NativeModules.BleManager);
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 function rssiToPercent(rssi) {
@@ -63,83 +65,64 @@ function rssiToRadarPos(pct, angleRad) {
 }
 function shortId(id) { return id.length > 17 ? id.slice(-17) : id; }
 
-// OUI — primeros 3 bytes del MAC → { abbr, label, icon }
+// ── OUI database ──────────────────────────────────────────────────────────────
 const OUI = {
-  // Apple / iPhone
-  '28:6B:B4': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
-  '68:DF:A5': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
-  '61:AC:E9': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
-  'A4:C3:F0': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
-  'F0:DB:E2': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
-  'DC:2C:26': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
-  'F8:4D:89': { abbr: 'IPH', label: 'iPhone',  icon: '📱' },
-  'BC:D0:74': { abbr: 'MAC', label: 'MacBook', icon: '💻' },
-  'A8:51:AB': { abbr: 'APD', label: 'AirPods', icon: '🎧' },
-  // Samsung
-  'F4:7B:5E': { abbr: 'SAM', label: 'Samsung', icon: '📱' },
-  '8C:F5:A3': { abbr: 'SAM', label: 'Samsung', icon: '📱' },
-  'DC:71:96': { abbr: 'SAM', label: 'Samsung', icon: '📱' },
-  'CC:4B:73': { abbr: 'SAM', label: 'Samsung', icon: '📱' },
-  'E4:A8:DF': { abbr: 'SAM', label: 'Samsung', icon: '📱' },
-  'A0:82:1F': { abbr: 'SGW', label: 'Galaxy W',icon: '⌚' },
-  '78:BD:BC': { abbr: 'SBD', label: 'Galaxy Buds', icon: '🎧' },
-  // Xiaomi
-  'AC:C1:EE': { abbr: 'XIA', label: 'Xiaomi',  icon: '📱' },
-  '64:B4:73': { abbr: 'XIA', label: 'Xiaomi',  icon: '📱' },
-  '28:6C:07': { abbr: 'XIA', label: 'Xiaomi',  icon: '📱' },
-  'F8:A2:D6': { abbr: 'MIB', label: 'Mi Band', icon: '⌚' },
-  // Google
-  'F4:85:89': { abbr: 'PIX', label: 'Pixel',   icon: '📱' },
-  'A4:77:33': { abbr: 'PIX', label: 'Pixel',   icon: '📱' },
-  '3C:28:6D': { abbr: 'PIX', label: 'Pixel',   icon: '📱' },
-  // Huawei
-  'AC:E0:10': { abbr: 'HUA', label: 'Huawei',  icon: '📱' },
-  '54:92:BE': { abbr: 'HUW', label: 'Huawei W',icon: '⌚' },
-  // OnePlus
-  '94:65:2D': { abbr: 'OPL', label: 'OnePlus', icon: '📱' },
-  // Sony
-  '00:17:EF': { abbr: 'SNY', label: 'Sony',    icon: '🎧' },
-  'A8:9C:ED': { abbr: 'SNY', label: 'Sony',    icon: '📱' },
-  // Motorola
-  'AC:37:43': { abbr: 'MOT', label: 'Moto',    icon: '📱' },
-  '9C:D2:1E': { abbr: 'MOT', label: 'Moto',    icon: '📱' },
-  // LG
-  'C4:36:6C': { abbr: 'LG',  label: 'LG',      icon: '📱' },
-  // Amazfit / Zepp
-  'AC:87:A3': { abbr: 'AMZ', label: 'Amazfit', icon: '⌚' },
-  // Fitbit
-  'C4:BE:84': { abbr: 'FIT', label: 'Fitbit',  icon: '⌚' },
-  // Garmin
-  '00:1D:0A': { abbr: 'GAR', label: 'Garmin',  icon: '⌚' },
-  // Microsoft
-  '00:15:5D': { abbr: 'MSF', label: 'PC',      icon: '💻' },
+  '28:6B:B4': { abbr: 'IPH', label: 'iPhone',   icon: '📱' },
+  '68:DF:A5': { abbr: 'IPH', label: 'iPhone',   icon: '📱' },
+  '61:AC:E9': { abbr: 'IPH', label: 'iPhone',   icon: '📱' },
+  'A4:C3:F0': { abbr: 'IPH', label: 'iPhone',   icon: '📱' },
+  'F0:DB:E2': { abbr: 'IPH', label: 'iPhone',   icon: '📱' },
+  'DC:2C:26': { abbr: 'IPH', label: 'iPhone',   icon: '📱' },
+  'F8:4D:89': { abbr: 'IPH', label: 'iPhone',   icon: '📱' },
+  'BC:D0:74': { abbr: 'MAC', label: 'MacBook',  icon: '💻' },
+  'A8:51:AB': { abbr: 'APD', label: 'AirPods',  icon: '🎧' },
+  'F4:7B:5E': { abbr: 'SAM', label: 'Samsung',  icon: '📱' },
+  '8C:F5:A3': { abbr: 'SAM', label: 'Samsung',  icon: '📱' },
+  'DC:71:96': { abbr: 'SAM', label: 'Samsung',  icon: '📱' },
+  'CC:4B:73': { abbr: 'SAM', label: 'Samsung',  icon: '📱' },
+  'A0:82:1F': { abbr: 'SGW', label: 'Galaxy W', icon: '⌚' },
+  '78:BD:BC': { abbr: 'SBD', label: 'Buds',     icon: '🎧' },
+  'AC:C1:EE': { abbr: 'XIA', label: 'Xiaomi',   icon: '📱' },
+  '64:B4:73': { abbr: 'XIA', label: 'Xiaomi',   icon: '📱' },
+  '28:6C:07': { abbr: 'XIA', label: 'Xiaomi',   icon: '📱' },
+  'F8:A2:D6': { abbr: 'MIB', label: 'Mi Band',  icon: '⌚' },
+  'F4:85:89': { abbr: 'PIX', label: 'Pixel',    icon: '📱' },
+  'A4:77:33': { abbr: 'PIX', label: 'Pixel',    icon: '📱' },
+  'AC:E0:10': { abbr: 'HUA', label: 'Huawei',   icon: '📱' },
+  '54:92:BE': { abbr: 'HUW', label: 'Huawei W', icon: '⌚' },
+  '94:65:2D': { abbr: 'OPL', label: 'OnePlus',  icon: '📱' },
+  'AC:37:43': { abbr: 'MOT', label: 'Moto',     icon: '📱' },
+  '9C:D2:1E': { abbr: 'MOT', label: 'Moto',     icon: '📱' },
+  'C4:36:6C': { abbr: 'LG',  label: 'LG',       icon: '📱' },
+  '00:17:EF': { abbr: 'SNY', label: 'Sony',     icon: '🎧' },
+  'A8:9C:ED': { abbr: 'SNY', label: 'Sony',     icon: '📱' },
+  'AC:87:A3': { abbr: 'AMZ', label: 'Amazfit',  icon: '⌚' },
+  'C4:BE:84': { abbr: 'FIT', label: 'Fitbit',   icon: '⌚' },
+  '00:1D:0A': { abbr: 'GAR', label: 'Garmin',   icon: '⌚' },
+  '00:15:5D': { abbr: 'MSF', label: 'PC',       icon: '💻' },
 };
 
 function resolveDevice(id, advertisedName) {
   const mac = id.replace(/-/g, ':').toUpperCase();
   const oui = mac.substring(0, 8);
-  const tail = mac.slice(-4).toUpperCase();
   const fullMac = mac.length >= 17 ? mac.slice(-17) : mac;
   const ouiEntry = OUI[oui];
   const firstByte = parseInt(mac.split(':')[0] || '0', 16);
   const isRandom = !!(firstByte & 0x02);
 
+  // Si tiene nombre real del dispositivo, usarlo directamente
   let displayName = advertisedName;
   if (!displayName || displayName.startsWith('DEV-') || displayName.startsWith('[')) {
-    if (ouiEntry) {
-      displayName = `${ouiEntry.icon} ${ouiEntry.abbr} ${fullMac}`;
-    } else if (isRandom) {
-      displayName = `🔀 ${fullMac}`;
-    } else {
-      displayName = fullMac;
-    }
+    if (ouiEntry) displayName = `${ouiEntry.icon} ${ouiEntry.abbr} ${fullMac}`;
+    else if (isRandom) displayName = `🔀 ${fullMac}`;
+    else displayName = fullMac;
   }
 
   const ouiLabel = ouiEntry
     ? `${ouiEntry.icon} ${ouiEntry.label}`
     : isRandom ? '🔀 Random/Priv' : '';
 
-  return { displayName, ouiLabel, ouiEntry, tail, fullMac, isRandom };
+  return { displayName, ouiLabel, ouiEntry, fullMac, isRandom };
 }
 
 // ── Audio beep ────────────────────────────────────────────────────────────────
@@ -235,7 +218,7 @@ function RadarDisplay({ devices, trackedId, sweepAngle, contacts }) {
             }]} />
             {contact && (
               <Text style={[styles.blipLabel, { left: pos.x+6, top: pos.y-8 }]}>
-                {contact.alias.slice(0,7)}
+                {contact.alias.slice(0,8)}
               </Text>
             )}
           </View>
@@ -257,14 +240,13 @@ function SaveContactModal({ visible, device, nameCache, existingContact, onSave,
   const nameOptions = [];
   const seen = new Set();
   const add = (name, source) => { if (name && !seen.has(name)) { seen.add(name); nameOptions.push({ name, source }); } };
-
   if (device) {
-    if (device.name && !device.name.startsWith('DEV-') && !device.name.startsWith('·') && !device.name.startsWith('🔀')) add(device.name, 'Advertising BLE');
-    if (nameCache?.[device.id]) add(nameCache[device.id], 'GATT (nombre real)');
+    if (device.name && !device.name.startsWith('🔀') && device.name.length > 4) add(device.name, 'Nombre del dispositivo');
+    if (nameCache?.[device.id]) add(nameCache[device.id], 'Nombre resuelto (GATT)');
     if (existingContact?.name) add(existingContact.name, 'Guardado anterior');
     const { displayName, ouiLabel } = resolveDevice(device.id, null);
-    if (ouiLabel) add(displayName, `OUI: ${ouiLabel}`);
-    add(shortId(device.id), 'ID del dispositivo');
+    if (ouiLabel) add(displayName, `Fabricante: ${ouiLabel}`);
+    add(shortId(device.id), 'MAC address');
   }
 
   useEffect(() => {
@@ -275,35 +257,29 @@ function SaveContactModal({ visible, device, nameCache, existingContact, onSave,
   }, [visible, device?.id]);
 
   if (!device) return null;
-
   return (
     <Modal visible={visible} transparent animationType="fade">
       <View style={styles.modalOverlay}>
-        <ScrollView contentContainerStyle={{ flexGrow: 1, justifyContent: 'center', padding: 16 }}>
+        <ScrollView contentContainerStyle={{ flexGrow:1, justifyContent:'center', padding:16 }}>
           <View style={styles.modalBox}>
             <Text style={styles.modalTitle}>{existingContact ? '[ EDITAR ]' : '[ NUEVO CONTACTO ]'}</Text>
             <Text style={styles.modalDevId}>{shortId(device.id)}</Text>
-
             <Text style={styles.modalLabel}>NOMBRE DETECTADO — toca para seleccionar</Text>
             {nameOptions.map((opt, i) => (
               <TouchableOpacity key={i}
-                style={[styles.nameOption, selectedName === opt.name && styles.nameOptionSelected]}
+                style={[styles.nameOption, selectedName===opt.name && styles.nameOptionSelected]}
                 onPress={() => { setSelectedName(opt.name); setAlias(opt.name); }}
               >
-                <Text style={[styles.nameOptionText, selectedName === opt.name && { color: GREEN }]} numberOfLines={1}>
-                  {opt.name}
-                </Text>
+                <Text style={[styles.nameOptionText, selectedName===opt.name && {color:GREEN}]} numberOfLines={1}>{opt.name}</Text>
                 <Text style={styles.nameOptionSource}>{opt.source}</Text>
               </TouchableOpacity>
             ))}
-
             <TouchableOpacity style={styles.btnGatt} onPress={() => onResolveGatt(device.id)} disabled={resolvingGatt}>
               {resolvingGatt
                 ? <ActivityIndicator color={GREEN} size="small" />
-                : <Text style={styles.btnGattText}>⟳ CONECTAR Y RESOLVER NOMBRE REAL (GATT)</Text>}
+                : <Text style={styles.btnGattText}>⟳ CONECTAR Y RESOLVER NOMBRE (GATT)</Text>}
             </TouchableOpacity>
-
-            <Text style={[styles.modalLabel, { marginTop: 12 }]}>ALIAS PERSONAL</Text>
+            <Text style={[styles.modalLabel, {marginTop:12}]}>ALIAS PERSONAL</Text>
             <TextInput
               style={styles.modalInput}
               value={alias}
@@ -312,21 +288,15 @@ function SaveContactModal({ visible, device, nameCache, existingContact, onSave,
               placeholderTextColor="#004410"
               maxLength={20}
             />
-
             <TouchableOpacity
               style={[styles.modalToggle, alertEnabled && styles.modalToggleOn]}
               onPress={() => setAlertEnabled(v => !v)}
             >
-              <Text style={[styles.modalToggleText, alertEnabled && { color: GREEN }]}>
+              <Text style={[styles.modalToggleText, alertEnabled && {color:GREEN}]}>
                 {alertEnabled ? '🔔 ALERTA PROXIMIDAD: ON' : '🔕 ALERTA PROXIMIDAD: OFF'}
               </Text>
             </TouchableOpacity>
-            {alertEnabled && (
-              <Text style={styles.modalHint}>
-                Recibirás notificación cuando este contacto esté cerca,{'\n'}incluso con la pantalla apagada
-              </Text>
-            )}
-
+            {alertEnabled && <Text style={styles.modalHint}>Notificación cuando esté cerca, aunque la pantalla esté apagada</Text>}
             <View style={styles.modalButtons}>
               {existingContact && (
                 <TouchableOpacity style={styles.modalBtnDelete} onPress={() => onDelete(device.id)}>
@@ -337,7 +307,7 @@ function SaveContactModal({ visible, device, nameCache, existingContact, onSave,
                 <Text style={styles.modalBtnCancelText}>[ CANCEL ]</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.modalBtnSave, !alias.trim() && { opacity: 0.4 }]}
+                style={[styles.modalBtnSave, !alias.trim() && {opacity:0.4}]}
                 onPress={() => alias.trim() && onSave(device.id, alias.trim(), selectedName, alertEnabled)}
                 disabled={!alias.trim()}
               >
@@ -357,51 +327,48 @@ function ContactsListModal({ visible, contacts, devices, onEdit, onClose, onTrac
   return (
     <Modal visible={visible} transparent animationType="slide">
       <View style={styles.modalOverlay}>
-        <View style={[styles.modalBox, { maxHeight: '85%', margin: 16 }]}>
+        <View style={[styles.modalBox, {maxHeight:'85%', margin:16}]}>
           <Text style={styles.modalTitle}>[ CONTACTOS ]</Text>
-          {entries.length === 0 ? (
-            <Text style={styles.modalEmpty}>Sin contactos.{'\n'}Escanea y mantén presionado un dispositivo.</Text>
-          ) : (
-            <ScrollView>
-              {entries.map(c => {
-                const dev = devices.get(c.id);
-                const online = !!dev;
-                const pct = dev ? rssiToPercent(avg(dev.rssiHistory)) : 0;
-                const distColor = pct > 0.6 ? GREEN : pct > 0.35 ? '#ffaa00' : '#ff4444';
-                return (
-                  <View key={c.id} style={styles.contactRow}>
-                    <View style={[styles.contactDot, { backgroundColor: online ? GREEN : '#1a1a1a' }]} />
-                    <View style={{ flex: 1 }}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <Text style={styles.contactAlias}>{c.alias}</Text>
-                        <Text style={{ color: c.alertEnabled ? GREEN : '#333', fontSize: 12 }}>
-                          {c.alertEnabled ? '🔔' : '🔕'}
-                        </Text>
+          {entries.length === 0
+            ? <Text style={styles.modalEmpty}>Sin contactos.{'\n'}Usa [ + REGISTRAR ] para agregar.</Text>
+            : (
+              <ScrollView>
+                {entries.map(c => {
+                  const dev = devices.get(c.id);
+                  const online = !!dev;
+                  const pct = dev ? rssiToPercent(avg(dev.rssiHistory)) : 0;
+                  const distColor = pct>0.6 ? GREEN : pct>0.35 ? '#ffaa00' : '#ff4444';
+                  return (
+                    <View key={c.id} style={styles.contactRow}>
+                      <View style={[styles.contactDot, {backgroundColor: online ? GREEN : '#1a1a1a'}]} />
+                      <View style={{flex:1}}>
+                        <View style={{flexDirection:'row', alignItems:'center', gap:6}}>
+                          <Text style={styles.contactAlias}>{c.alias}</Text>
+                          <Text style={{color: c.alertEnabled ? GREEN : '#333', fontSize:12}}>{c.alertEnabled ? '🔔' : '🔕'}</Text>
+                        </View>
+                        <Text style={styles.contactSub} numberOfLines={1}>{c.name}</Text>
+                        {online
+                          ? <Text style={[styles.contactDist, {color:distColor}]}>{rssiToDistance(avg(dev.rssiHistory))}  ·  {Math.round(avg(dev.rssiHistory))} dBm</Text>
+                          : <Text style={[styles.contactSub, {color:'#222'}]}>OFFLINE</Text>
+                        }
                       </View>
-                      <Text style={styles.contactSub} numberOfLines={1}>{c.name}</Text>
-                      {online && (
-                        <Text style={[styles.contactDist, { color: distColor }]}>
-                          {rssiToDistance(avg(dev.rssiHistory))}  ·  {Math.round(avg(dev.rssiHistory))} dBm
-                        </Text>
-                      )}
-                      {!online && <Text style={[styles.contactSub, { color: '#222' }]}>OFFLINE</Text>}
-                    </View>
-                    <View style={{ gap: 4 }}>
-                      {online && (
-                        <TouchableOpacity style={styles.contactTrack} onPress={() => { onTrack(c.id); onClose(); }}>
-                          <Text style={styles.contactTrackText}>RADAR</Text>
+                      <View style={{gap:4}}>
+                        {online && (
+                          <TouchableOpacity style={styles.contactTrack} onPress={() => {onTrack(c.id); onClose();}}>
+                            <Text style={styles.contactTrackText}>RADAR</Text>
+                          </TouchableOpacity>
+                        )}
+                        <TouchableOpacity style={styles.contactEdit} onPress={() => onEdit(c.id)}>
+                          <Text style={styles.contactEditText}>EDITAR</Text>
                         </TouchableOpacity>
-                      )}
-                      <TouchableOpacity style={styles.contactEdit} onPress={() => onEdit(c.id)}>
-                        <Text style={styles.contactEditText}>EDITAR</Text>
-                      </TouchableOpacity>
+                      </View>
                     </View>
-                  </View>
-                );
-              })}
-            </ScrollView>
-          )}
-          <TouchableOpacity style={[styles.modalBtnCancel, { marginTop: 10 }]} onPress={onClose}>
+                  );
+                })}
+              </ScrollView>
+            )
+          }
+          <TouchableOpacity style={[styles.modalBtnCancel, {marginTop:10}]} onPress={onClose}>
             <Text style={styles.modalBtnCancelText}>[ CERRAR ]</Text>
           </TouchableOpacity>
         </View>
@@ -412,7 +379,6 @@ function ContactsListModal({ visible, contacts, devices, onEdit, onClose, onTrac
 
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
-  const manager = useRef(null);
   const [scanning, setScanning] = useState(false);
   const [devices, setDevices] = useState(new Map());
   const [trackedId, setTrackedId] = useState(null);
@@ -430,12 +396,13 @@ export default function App() {
   const sweepAngle = useRef(new Animated.Value(0)).current;
   const sweepAnim = useRef(null);
   const prevTrendRef = useRef('estable');
+  const listenersRef = useRef([]);
 
   useTrackerSound(trackedDevice, scanning);
 
   // ── init ──────────────────────────────────────────────────────────────────
   useEffect(() => {
-    manager.current = new BleManager();
+    BleManager.start({ showAlert: false });
     requestPermissions();
     activateKeepAwakeAsync();
     setupNotifications();
@@ -446,11 +413,58 @@ export default function App() {
       if (c) setContacts(JSON.parse(c));
       if (n) setNameCache(JSON.parse(n));
     });
-    // verificar si había background activo
-    TaskManager.isTaskRegisteredAsync(BLE_BACKGROUND_TASK).then(active => {
-      setBackgroundActive(active);
+    TaskManager.isTaskRegisteredAsync(BLE_BACKGROUND_TASK).then(setBackgroundActive);
+
+    // ── listeners de ble-manager ─────────────────────────────────────────
+    const onDiscover = BleManagerEmitter.addListener(
+      'BleManagerDiscoverPeripheral',
+      (peripheral) => {
+        const rssi = peripheral.rssi ?? -100;
+        const id = peripheral.id;
+        // ble-manager sí devuelve peripheral.name para Classic y BLE
+        const advName = peripheral.name || peripheral.advertising?.localName || null;
+
+        setNameCache(prev => {
+          if (advName && prev[id] !== advName) {
+            const updated = { ...prev, [id]: advName };
+            AsyncStorage.setItem(NAME_CACHE_KEY, JSON.stringify(updated));
+            return updated;
+          }
+          return prev;
+        });
+
+        setDevices(prev => {
+          const next = new Map(prev);
+          const existing = next.get(id);
+          const history = existing
+            ? [...existing.rssiHistory.slice(-(HISTORY_SIZE-1)), rssi]
+            : [rssi];
+          // nombre: primero el anunciado, luego cache, luego OUI
+          const cachedName = advName;
+          const { displayName } = resolveDevice(id, cachedName);
+          next.set(id, {
+            id,
+            name: displayName,
+            rawName: advName || existing?.rawName || null,
+            rssi,
+            rssiHistory: history,
+            lastSeen: Date.now(),
+          });
+          return next;
+        });
+      }
+    );
+
+    const onStop = BleManagerEmitter.addListener('BleManagerStopScan', () => {
+      if (scanRef.current) startScanCycle();
     });
-    return () => { manager.current?.destroy(); deactivateKeepAwake(); };
+
+    listenersRef.current = [onDiscover, onStop];
+    return () => {
+      listenersRef.current.forEach(l => l.remove());
+      BleManager.stopScan();
+      deactivateKeepAwake();
+    };
   }, []);
 
   // ── permisos ──────────────────────────────────────────────────────────────
@@ -465,111 +479,42 @@ export default function App() {
       ]);
       const ok = Object.values(grants).every(v => v === PermissionsAndroid.RESULTS.GRANTED);
       setPermissionsOk(ok);
+      if (!ok) Alert.alert('Permisos necesarios', 'Activa Bluetooth y Ubicación en Configuración.');
     } catch { setPermissionsOk(false); }
   };
 
-  // ── background toggle ─────────────────────────────────────────────────────
-  const toggleBackground = async () => {
-    const alertContacts = Object.values(contacts).filter(c => c.alertEnabled);
-    if (alertContacts.length === 0) {
-      Alert.alert('Sin contactos', 'Primero guarda contactos con 🔔 Alerta activada.');
-      return;
-    }
-    if (backgroundActive) {
-      // desactivar
-      try {
-        const isReg = await TaskManager.isTaskRegisteredAsync(BLE_BACKGROUND_TASK);
-        if (isReg) await TaskManager.unregisterTaskAsync(BLE_BACKGROUND_TASK);
-      } catch {}
-      await dismissForegroundNotification();
-      setBackgroundActive(false);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-    } else {
-      // activar
-      const names = alertContacts.map(c => c.alias);
-      await showForegroundNotification(names);
-      setBackgroundActive(true);
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      Alert.alert(
-        '👾 Rastreo en background activado',
-        `Buscando:\n${names.join('\n')}\n\nRecibirás una notificación cuando estén cerca.`,
-        [{ text: 'OK' }]
-      );
-    }
-  };
-
-  // ── persistencia ──────────────────────────────────────────────────────────
-  const persistContacts = useCallback(async (updated) => {
-    setContacts(updated);
-    await AsyncStorage.setItem(CONTACTS_KEY, JSON.stringify(updated));
+  // ── scan ──────────────────────────────────────────────────────────────────
+  const startScanCycle = useCallback(() => {
+    if (!scanRef.current) return;
+    // allowDuplicates=true para actualizar RSSI continuamente
+    // scanMode 2 = SCAN_MODE_LOW_LATENCY (máxima frecuencia)
+    BleManager.scan([], SCAN_SECONDS, true, {
+      scanMode: 2,
+      callbackType: 1, // ALL_MATCHES
+      matchMode: 1,    // AGGRESSIVE
+      numberOfMatches: 3,
+      reportDelay: 0,
+    }).catch(() => {});
   }, []);
 
-  const persistNameCache = useCallback(async (updated) => {
-    setNameCache(updated);
-    await AsyncStorage.setItem(NAME_CACHE_KEY, JSON.stringify(updated));
+  const startScan = useCallback(() => {
+    if (!permissionsOk) return;
+    scanRef.current = true;
+    setScanning(true);
+    setDevices(new Map());
+    startScanCycle();
+  }, [permissionsOk, startScanCycle]);
+
+  const stopScan = useCallback(() => {
+    scanRef.current = false;
+    setScanning(false);
+    BleManager.stopScan();
+    setTrackedId(null);
+    setTrackedDevice(null);
+    setDevices(new Map());
   }, []);
 
-  // ── GATT ──────────────────────────────────────────────────────────────────
-  const resolveGatt = useCallback(async (deviceId) => {
-    if (!manager.current) return;
-    setResolvingGatt(true);
-    try {
-      manager.current.stopDeviceScan();
-      const device = await manager.current.connectToDevice(deviceId, { timeout: 8000 });
-      await device.discoverAllServicesAndCharacteristics();
-      const name = device.name || null;
-      await device.cancelConnection();
-      if (name) {
-        const updated = { ...nameCache, [deviceId]: name };
-        await persistNameCache(updated);
-        setDevices(prev => {
-          const next = new Map(prev);
-          const ex = next.get(deviceId);
-          if (ex) next.set(deviceId, { ...ex, name });
-          return next;
-        });
-        Alert.alert('✓ Nombre resuelto', `Dispositivo: ${name}`);
-      } else {
-        Alert.alert('Sin nombre', 'El dispositivo no expone nombre por GATT.\nEscribe el alias manualmente.');
-      }
-    } catch {
-      Alert.alert('Error GATT', 'No se pudo conectar.\nEl dispositivo puede rechazar conexiones.\nEscribe el alias manualmente.');
-    } finally {
-      setResolvingGatt(false);
-    }
-  }, [nameCache, persistNameCache]);
-
-  const handleSaveContact = useCallback((id, alias, name, alertEnabled) => {
-    const updated = { ...contacts, [id]: { id, alias, name, alertEnabled } };
-    persistContacts(updated);
-    setSaveModal({ visible: false, device: null });
-    // si background activo, actualizar notificación
-    if (backgroundActive) {
-      const alertContacts = Object.values(updated).filter(c => c.alertEnabled);
-      showForegroundNotification(alertContacts.map(c => c.alias));
-    }
-  }, [contacts, persistContacts, backgroundActive]);
-
-  // cuando RegisterMode encuentra un dispositivo → abrir SaveContactModal con él
-  const handleRegisterDevice = useCallback((dev) => {
-    setRegisterModal(false);
-    const displayDev = {
-      id: dev.id,
-      name: dev.name || nameCache[dev.id] || dev.id.slice(-17),
-      rssi: dev.rssi,
-      rssiHistory: [dev.rssi],
-    };
-    setTimeout(() => setSaveModal({ visible: true, device: displayDev }), 300);
-  }, [nameCache]);
-
-  const handleDeleteContact = useCallback((id) => {
-    const updated = { ...contacts };
-    delete updated[id];
-    persistContacts(updated);
-    setSaveModal({ visible: false, device: null });
-  }, [contacts, persistContacts]);
-
-  // ── sweep ─────────────────────────────────────────────────────────────────
+  // ── sweep animation ───────────────────────────────────────────────────────
   useEffect(() => {
     if (scanning) {
       sweepAngle.setValue(0);
@@ -580,52 +525,6 @@ export default function App() {
     } else { sweepAnim.current?.stop(); }
     return () => sweepAnim.current?.stop();
   }, [scanning]);
-
-  // ── BLE scan ──────────────────────────────────────────────────────────────
-  const startScan = useCallback(() => {
-    if (!manager.current || !permissionsOk) return;
-    scanRef.current = true;
-    setScanning(true);
-    const doScan = () => {
-      if (!scanRef.current) return;
-      manager.current.startDeviceScan(null, { allowDuplicates: true }, (error, device) => {
-        if (error || !device) return;
-        const rssi = device.rssi ?? -100;
-        const advName = device.name || device.localName || null;
-        const { displayName } = resolveDevice(device.id, advName || nameCache[device.id] || null);
-        if (advName && !nameCache[device.id]) {
-          setNameCache(prev => {
-            if (prev[device.id] === advName) return prev;
-            const updated = { ...prev, [device.id]: advName };
-            AsyncStorage.setItem(NAME_CACHE_KEY, JSON.stringify(updated));
-            return updated;
-          });
-        }
-        setDevices(prev => {
-          const next = new Map(prev);
-          const existing = next.get(device.id);
-          const history = existing ? [...existing.rssiHistory.slice(-(HISTORY_SIZE-1)), rssi] : [rssi];
-          next.set(device.id, { id: device.id, name: displayName, rssi, rssiHistory: history, lastSeen: Date.now() });
-          return next;
-        });
-      });
-      setTimeout(() => {
-        if (!scanRef.current) return;
-        manager.current.stopDeviceScan();
-        setTimeout(doScan, 200);
-      }, SCAN_INTERVAL);
-    };
-    doScan();
-  }, [permissionsOk, nameCache]);
-
-  const stopScan = useCallback(() => {
-    scanRef.current = false;
-    setScanning(false);
-    manager.current?.stopDeviceScan();
-    setTrackedId(null);
-    setTrackedDevice(null);
-    setDevices(new Map());
-  }, []);
 
   // ── tracked device ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -640,73 +539,172 @@ export default function App() {
     setTrackedDevice({ ...dev, avgRssi, percent: rssiToPercent(avgRssi), distance: rssiToDistance(avgRssi), trend: t });
   }, [devices, trackedId]);
 
+  // ── limpiar viejos ────────────────────────────────────────────────────────
   useEffect(() => {
     const interval = setInterval(() => {
       const now = Date.now();
       setDevices(prev => {
         const next = new Map(prev);
-        for (const [id, d] of next) if (now - d.lastSeen > 15000) next.delete(id);
+        for (const [id, d] of next) if (now - d.lastSeen > 20000) next.delete(id);
         return next;
       });
     }, 5000);
     return () => clearInterval(interval);
   }, []);
 
+  // ── GATT resolve ──────────────────────────────────────────────────────────
+  const resolveGatt = useCallback(async (deviceId) => {
+    setResolvingGatt(true);
+    try {
+      await BleManager.stopScan();
+      await BleManager.connect(deviceId);
+      const info = await BleManager.retrieveServices(deviceId);
+      const name = info.name || null;
+      await BleManager.disconnect(deviceId);
+      if (name) {
+        const updated = { ...nameCache, [deviceId]: name };
+        setNameCache(updated);
+        await AsyncStorage.setItem(NAME_CACHE_KEY, JSON.stringify(updated));
+        setDevices(prev => {
+          const next = new Map(prev);
+          const ex = next.get(deviceId);
+          if (ex) next.set(deviceId, { ...ex, rawName: name, name: resolveDevice(deviceId, name).displayName });
+          return next;
+        });
+        Alert.alert('✓ Nombre resuelto', name);
+      } else {
+        Alert.alert('Sin nombre', 'El dispositivo no expone nombre.\nEscribe el alias manualmente.');
+      }
+    } catch {
+      Alert.alert('Error', 'No se pudo conectar.\nEscribe el alias manualmente.');
+    } finally {
+      setResolvingGatt(false);
+      if (scanRef.current) startScanCycle();
+    }
+  }, [nameCache, startScanCycle]);
+
+  // ── persistencia ──────────────────────────────────────────────────────────
+  const persistContacts = useCallback(async (updated) => {
+    setContacts(updated);
+    await AsyncStorage.setItem(CONTACTS_KEY, JSON.stringify(updated));
+  }, []);
+
+  const handleSaveContact = useCallback((id, alias, name, alertEnabled) => {
+    const updated = { ...contacts, [id]: { id, alias, name, alertEnabled } };
+    persistContacts(updated);
+    setSaveModal({ visible: false, device: null });
+    if (backgroundActive) {
+      const names = Object.values(updated).filter(c => c.alertEnabled).map(c => c.alias);
+      showForegroundNotification(names);
+    }
+  }, [contacts, persistContacts, backgroundActive]);
+
+  const handleDeleteContact = useCallback((id) => {
+    const updated = { ...contacts };
+    delete updated[id];
+    persistContacts(updated);
+    setSaveModal({ visible: false, device: null });
+  }, [contacts, persistContacts]);
+
+  const handleRegisterDevice = useCallback((dev) => {
+    setRegisterModal(false);
+    const displayDev = {
+      id: dev.id,
+      name: dev.name || nameCache[dev.id] || dev.id.slice(-17),
+      rssi: dev.rssi,
+      rssiHistory: [dev.rssi],
+    };
+    setTimeout(() => setSaveModal({ visible: true, device: displayDev }), 300);
+  }, [nameCache]);
+
+  // ── background ────────────────────────────────────────────────────────────
+  const toggleBackground = async () => {
+    const alertContacts = Object.values(contacts).filter(c => c.alertEnabled);
+    if (alertContacts.length === 0) {
+      Alert.alert('Sin contactos', 'Primero guarda contactos con 🔔 Alerta activada.');
+      return;
+    }
+    if (backgroundActive) {
+      try {
+        const isReg = await TaskManager.isTaskRegisteredAsync(BLE_BACKGROUND_TASK);
+        if (isReg) await TaskManager.unregisterTaskAsync(BLE_BACKGROUND_TASK);
+      } catch {}
+      await dismissForegroundNotification();
+      setBackgroundActive(false);
+    } else {
+      await showForegroundNotification(alertContacts.map(c => c.alias));
+      setBackgroundActive(true);
+      Alert.alert('👾 Background activado', `Buscando:\n${alertContacts.map(c => c.alias).join('\n')}`);
+    }
+  };
+
+  // ── alerta proximidad contactos ───────────────────────────────────────────
+  useEffect(() => {
+    if (!scanning) return;
+    const interval = setInterval(() => {
+      for (const [id, dev] of devices) {
+        const contact = contacts[id];
+        if (!contact?.alertEnabled) continue;
+        if (rssiToPercent(avg(dev.rssiHistory)) > 0.55) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+          break;
+        }
+      }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [scanning, devices, contacts]);
+
+  // ── render ────────────────────────────────────────────────────────────────
   const deviceList = Array.from(devices.values()).sort((a, b) => b.rssi - a.rssi);
   const count = deviceList.length;
   const contactCount = Object.keys(contacts).length;
   const alertContactCount = Object.values(contacts).filter(c => c.alertEnabled).length;
   const contactsOnline = Object.values(contacts).filter(c => devices.has(c.id)).length;
   const trendColor = !trackedDevice ? GREEN :
-    trackedDevice.trend === 'acercando' ? GREEN :
-    trackedDevice.trend === 'alejando' ? '#ff4444' : '#ffaa00';
+    trackedDevice.trend==='acercando' ? GREEN :
+    trackedDevice.trend==='alejando' ? '#ff4444' : '#ffaa00';
   const trackedContact = trackedId ? contacts[trackedId] : null;
 
   return (
     <View style={styles.root}>
-      {/* cabecera */}
       <View style={styles.header}>
         <Text style={styles.headerModel}>MU-TH-UR 6000</Text>
         <Text style={styles.headerTitle}>MOTION TRACKER</Text>
         <View style={styles.headerLine} />
       </View>
 
-      {/* radar */}
       <View style={styles.radarWrapper}>
         <RadarDisplay devices={devices} trackedId={trackedId} sweepAngle={sweepAngle} contacts={contacts} />
         {!scanning && !backgroundActive && (
-          <View style={[styles.radarOverlay, { borderRadius: RADAR_R }]}>
+          <View style={[styles.radarOverlay, {borderRadius:RADAR_R}]}>
             <Text style={styles.radarOffText}>OFFLINE</Text>
           </View>
         )}
         {!scanning && backgroundActive && (
-          <View style={[styles.radarOverlay, { borderRadius: RADAR_R }]}>
-            <Text style={[styles.radarOffText, { color: '#ffaa00', fontSize: 13 }]}>
-              🔍 BACKGROUND{'\n'}ACTIVO
-            </Text>
+          <View style={[styles.radarOverlay, {borderRadius:RADAR_R}]}>
+            <Text style={[styles.radarOffText, {color:'#ffaa00', fontSize:13}]}>🔍 BACKGROUND{'\n'}ACTIVO</Text>
           </View>
         )}
       </View>
 
-      {/* info panel */}
       <View style={styles.infoPanel}>
         {trackedDevice ? (
           <>
             <View style={styles.infoPanelRow}>
               <View style={styles.infoCol}>
                 <Text style={styles.infoKey}>TARGET</Text>
-                <Text style={[styles.infoVal, trackedContact && { color: '#00ccff' }]} numberOfLines={1}>
-                  {trackedContact ? trackedContact.alias : trackedDevice.name}
+                <Text style={[styles.infoVal, trackedContact && {color:'#00ccff'}]} numberOfLines={1}>
+                  {trackedContact ? trackedContact.alias : (trackedDevice.rawName || trackedDevice.name)}
                 </Text>
-                {trackedContact && <Text style={styles.infoSubVal}>{trackedDevice.name}</Text>}
+                {trackedContact && <Text style={styles.infoSubVal} numberOfLines={1}>{trackedDevice.rawName || trackedDevice.name}</Text>}
               </View>
               <View style={styles.infoCol}>
                 <Text style={styles.infoKey}>DIST</Text>
-                <Text style={[styles.infoValLg, { color: GREEN }]}>{trackedDevice.distance}</Text>
+                <Text style={[styles.infoValLg, {color:GREEN}]}>{trackedDevice.distance}</Text>
               </View>
               <View style={styles.infoCol}>
                 <Text style={styles.infoKey}>SIGNAL</Text>
-                <Text style={[styles.infoValLg, { color: trendColor }]}>{Math.round(trackedDevice.avgRssi)} dBm</Text>
+                <Text style={[styles.infoValLg, {color:trendColor}]}>{Math.round(trackedDevice.avgRssi)} dBm</Text>
               </View>
             </View>
             <View style={styles.signalBarBg}>
@@ -716,13 +714,13 @@ export default function App() {
               }]} />
             </View>
             <View style={styles.trendRow}>
-              <Text style={[styles.trendText, { color: trendColor }]}>
+              <Text style={[styles.trendText, {color:trendColor}]}>
                 {trackedDevice.trend==='acercando' && '▲  ACERCÁNDOSE'}
                 {trackedDevice.trend==='alejando' && '▼  ALEJÁNDOSE'}
                 {trackedDevice.trend==='estable' && '●  ESTABLE'}
               </Text>
               <TouchableOpacity style={styles.btnSaveInline}
-                onPress={() => setSaveModal({ visible: true, device: trackedDevice })}>
+                onPress={() => setSaveModal({visible:true, device:trackedDevice})}>
                 <Text style={styles.btnSaveInlineText}>{contacts[trackedId] ? '✎ EDITAR' : '＋ GUARDAR'}</Text>
               </TouchableOpacity>
             </View>
@@ -732,46 +730,42 @@ export default function App() {
             {scanning
               ? `${count} SEÑALES  ·  ${contactsOnline}/${contactCount} CONTACTOS`
               : backgroundActive
-                ? `🔍 RASTREANDO EN BACKGROUND\n${alertContactCount} contactos con alerta activa`
+                ? `🔍 BACKGROUND ACTIVO\n${alertContactCount} contactos monitoreados`
                 : 'SISTEMA EN ESPERA'}
           </Text>
         )}
       </View>
 
-      {/* fila principal de botones */}
       <View style={styles.controls}>
         <TouchableOpacity
           style={[styles.btnMain, scanning && styles.btnMainActive]}
           onPress={scanning ? stopScan : startScan}
           disabled={!permissionsOk}
         >
-          <Text style={[styles.btnMainText, scanning && { color: '#ff4444' }]}>
+          <Text style={[styles.btnMainText, scanning && {color:'#ff4444'}]}>
             {!permissionsOk ? 'SIN PERMISOS' : scanning ? '[ APAGAR ]' : '[ ACTIVAR ]'}
           </Text>
         </TouchableOpacity>
-
         <TouchableOpacity
-          style={[styles.btnContacts, contactsOnline > 0 && styles.btnContactsActive]}
+          style={[styles.btnContacts, contactsOnline>0 && styles.btnContactsActive]}
           onPress={() => setContactsModal(true)}
         >
-          <Text style={[styles.btnContactsText, contactsOnline > 0 && { color: '#00ccff' }]}>
-            {contactCount > 0 ? `[ ${contactsOnline > 0 ? '●' : '○'} ${contactCount} ]` : '[ LISTA ]'}
+          <Text style={[styles.btnContactsText, contactsOnline>0 && {color:'#00ccff'}]}>
+            {contactCount>0 ? `[ ${contactsOnline>0?'●':'○'} ${contactCount} ]` : '[ LISTA ]'}
           </Text>
         </TouchableOpacity>
       </View>
 
-      {/* botón modo registro */}
       <TouchableOpacity style={styles.btnRegister} onPress={() => setRegisterModal(true)}>
         <Text style={styles.btnRegisterText}>[ ＋ REGISTRAR NUEVO CONTACTO ]</Text>
       </TouchableOpacity>
 
-      {/* botón background */}
       {alertContactCount > 0 && (
         <TouchableOpacity
           style={[styles.btnBackground, backgroundActive && styles.btnBackgroundActive]}
           onPress={toggleBackground}
         >
-          <Text style={[styles.btnBackgroundText, backgroundActive && { color: '#ffaa00' }]}>
+          <Text style={[styles.btnBackgroundText, backgroundActive && {color:'#ffaa00'}]}>
             {backgroundActive
               ? `[ 🔍 BACKGROUND ON — ${alertContactCount} CONTACTOS ]`
               : `[ 🔕 ACTIVAR RASTREO EN BACKGROUND ]`}
@@ -779,10 +773,9 @@ export default function App() {
         </TouchableOpacity>
       )}
 
-      {/* controles secundarios */}
       {scanning && (
-        <View style={[styles.controls, { marginTop: 2 }]}>
-          {count > 0 && (
+        <View style={[styles.controls, {marginTop:2}]}>
+          {count>0 && (
             <TouchableOpacity style={styles.btnSecondary} onPress={() => setShowList(v => !v)}>
               <Text style={styles.btnSecondaryText}>{showList ? '[ RADAR ]' : `[ ${count} SEÑALES ]`}</Text>
             </TouchableOpacity>
@@ -795,9 +788,8 @@ export default function App() {
         </View>
       )}
 
-      {/* lista */}
       {showList && scanning && (
-        <ScrollView style={styles.list} contentContainerStyle={{ paddingBottom: 16 }}>
+        <ScrollView style={styles.list} contentContainerStyle={{paddingBottom:16}}>
           {deviceList.map(dev => {
             const pct = rssiToPercent(avg(dev.rssiHistory));
             const isTracked = dev.id === trackedId;
@@ -807,19 +799,23 @@ export default function App() {
               <TouchableOpacity key={dev.id}
                 style={[styles.devRow, isTracked && styles.devRowActive, contact && styles.devRowContact]}
                 onPress={() => { setTrackedId(dev.id); setShowList(false); }}
-                onLongPress={() => setSaveModal({ visible: true, device: dev })}
+                onLongPress={() => setSaveModal({visible:true, device:dev})}
               >
                 <View style={styles.devBarBg}>
-                  <View style={[styles.devBarFill, { width: `${Math.round(pct*100)}%`, backgroundColor: barColor }]} />
+                  <View style={[styles.devBarFill, {width:`${Math.round(pct*100)}%`, backgroundColor:barColor}]} />
                 </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.devName, contact && { color: '#00ccff' }]} numberOfLines={1}>
-                    {contact ? contact.alias : dev.name}
+                <View style={{flex:1}}>
+                  <Text style={[styles.devName, contact && {color:'#00ccff'}]} numberOfLines={1}>
+                    {contact ? contact.alias : (dev.rawName || dev.name)}
                   </Text>
-                  {contact && <Text style={styles.devSubName} numberOfLines={1}>{dev.name}</Text>}
+                  {(contact || dev.rawName) && (
+                    <Text style={styles.devSubName} numberOfLines={1}>
+                      {contact ? (dev.rawName || dev.name) : dev.name}
+                    </Text>
+                  )}
                 </View>
-                <Text style={{ fontSize: 11, marginRight: 4 }}>{contact?.alertEnabled ? '🔔' : ''}</Text>
-                <Text style={[styles.devRssi, { color: barColor }]}>{dev.rssi} dBm</Text>
+                <Text style={{fontSize:11, marginRight:4}}>{contact?.alertEnabled ? '🔔' : ''}</Text>
+                <Text style={[styles.devRssi, {color:barColor}]}>{dev.rssi} dBm</Text>
               </TouchableOpacity>
             );
           })}
@@ -828,7 +824,7 @@ export default function App() {
       )}
 
       <View style={styles.footer}>
-        <Text style={styles.footerText}>WEYLAND-YUTANI CORP  ·  v3.0</Text>
+        <Text style={styles.footerText}>WEYLAND-YUTANI CORP  ·  v4.0</Text>
       </View>
 
       <SaveContactModal
@@ -838,7 +834,7 @@ export default function App() {
         existingContact={saveModal.device ? contacts[saveModal.device.id] : null}
         onSave={handleSaveContact}
         onDelete={handleDeleteContact}
-        onClose={() => setSaveModal({ visible: false, device: null })}
+        onClose={() => setSaveModal({visible:false, device:null})}
         onResolveGatt={resolveGatt}
         resolvingGatt={resolvingGatt}
       />
@@ -847,16 +843,16 @@ export default function App() {
         contacts={contacts}
         devices={devices}
         onEdit={(id) => {
-          const dev = devices.get(id) || { id, name: contacts[id]?.name || nameCache[id] || id };
+          const dev = devices.get(id) || {id, name: contacts[id]?.name || nameCache[id] || id};
           setContactsModal(false);
-          setSaveModal({ visible: true, device: dev });
+          setSaveModal({visible:true, device:dev});
         }}
         onClose={() => setContactsModal(false)}
         onTrack={(id) => { setTrackedId(id); setContactsModal(false); }}
       />
       <RegisterMode
         visible={registerModal}
-        manager={manager.current}
+        manager={BleManager}
         onDeviceFound={handleRegisterDevice}
         onClose={() => setRegisterModal(false)}
       />
@@ -866,95 +862,95 @@ export default function App() {
 
 // ── estilos ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: BG, paddingTop: 44, paddingHorizontal: 12 },
-  header: { alignItems: 'center', marginBottom: 6 },
-  headerModel: { color: DIMGREEN, fontSize: 10, letterSpacing: 6, fontFamily: MONO },
-  headerTitle: { color: GREEN, fontSize: 20, fontWeight: 'bold', letterSpacing: 8, fontFamily: MONO },
-  headerLine: { width: '100%', height: 1, backgroundColor: DIMGREEN, marginTop: 6 },
-  radarWrapper: { alignItems: 'center', marginVertical: 6, position: 'relative' },
-  radarContainer: { position: 'relative' },
-  radarBg: { position: 'absolute', width: '100%', height: '100%', backgroundColor: BG },
-  radarRing: { position: 'absolute', borderWidth: 1, borderColor: '#003310' },
-  radarLine: { position: 'absolute', backgroundColor: '#003310' },
-  sweepLine: { position: 'absolute', height: 2, backgroundColor: GREEN, opacity: 0.85, shadowColor: GREEN, shadowOpacity: 1, shadowRadius: 10 },
-  blip: { position: 'absolute', elevation: 5 },
-  blipLabel: { position: 'absolute', color: '#00ccff', fontSize: 7, fontFamily: MONO },
-  radarLabel: { position: 'absolute', color: '#005520', fontSize: 8, fontFamily: MONO },
-  radarOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', backgroundColor: '#000d00cc' },
-  radarOffText: { color: '#ff4444', fontSize: 18, letterSpacing: 6, fontFamily: MONO, textAlign: 'center' },
-  infoPanel: { borderWidth: 1, borderColor: DIMGREEN, borderRadius: 6, padding: 10, marginBottom: 6, backgroundColor: '#00080050', minHeight: 62 },
-  infoPanelRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
-  infoCol: { flex: 1, alignItems: 'center' },
-  infoKey: { color: '#005520', fontSize: 8, letterSpacing: 2, fontFamily: MONO },
-  infoVal: { color: GREEN, fontSize: 11, fontFamily: MONO },
-  infoSubVal: { color: '#005520', fontSize: 9, fontFamily: MONO },
-  infoValLg: { fontSize: 15, fontWeight: 'bold', fontFamily: MONO },
-  signalBarBg: { height: 5, backgroundColor: '#001a00', borderRadius: 3, overflow: 'hidden', marginBottom: 5 },
-  signalBarFill: { height: '100%', borderRadius: 3 },
-  trendRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  trendText: { fontSize: 11, letterSpacing: 2, fontFamily: MONO },
-  btnSaveInline: { borderWidth: 1, borderColor: '#005520', borderRadius: 4, paddingHorizontal: 8, paddingVertical: 2 },
-  btnSaveInlineText: { color: '#00aa33', fontSize: 9, fontFamily: MONO },
-  infoIdle: { color: '#005520', fontSize: 11, textAlign: 'center', letterSpacing: 1, fontFamily: MONO, paddingVertical: 6, lineHeight: 18 },
-  controls: { flexDirection: 'row', gap: 8, marginBottom: 6 },
-  btnMain: { flex: 2, borderWidth: 1, borderColor: GREEN, borderRadius: 4, paddingVertical: 11, alignItems: 'center' },
-  btnMainActive: { borderColor: '#ff4444' },
-  btnMainText: { color: GREEN, fontSize: 13, letterSpacing: 3, fontFamily: MONO },
-  btnContacts: { flex: 1, borderWidth: 1, borderColor: DIMGREEN, borderRadius: 4, paddingVertical: 11, alignItems: 'center' },
-  btnContactsActive: { borderColor: '#00ccff' },
-  btnContactsText: { color: DIMGREEN, fontSize: 12, letterSpacing: 1, fontFamily: MONO },
-  btnBackground: { borderWidth: 1, borderColor: '#333', borderRadius: 4, paddingVertical: 10, alignItems: 'center', marginBottom: 6 },
-  btnBackgroundActive: { borderColor: '#ffaa00', backgroundColor: '#1a1200' },
-  btnBackgroundText: { color: '#555', fontSize: 10, letterSpacing: 1, fontFamily: MONO },
-  btnRegister: { borderWidth: 1, borderColor: '#004422', borderRadius: 4, paddingVertical: 10, alignItems: 'center', marginBottom: 6 },
-  btnRegisterText: { color: '#008833', fontSize: 11, letterSpacing: 1, fontFamily: MONO },
-  btnSecondary: { flex: 1, borderWidth: 1, borderColor: '#ffaa00', borderRadius: 4, paddingVertical: 10, alignItems: 'center' },
-  btnSecondaryText: { color: '#ffaa00', fontSize: 11, letterSpacing: 1, fontFamily: MONO },
-  btnCancel: { flex: 1, borderWidth: 1, borderColor: '#ff4444', borderRadius: 4, paddingVertical: 10, alignItems: 'center' },
-  btnCancelText: { color: '#ff4444', fontSize: 11, letterSpacing: 1, fontFamily: MONO },
-  list: { flex: 1 },
-  devRow: { flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1, borderColor: '#001a00', paddingVertical: 7 },
-  devRowActive: { backgroundColor: '#001a00' },
-  devRowContact: { borderLeftWidth: 2, borderLeftColor: '#00ccff', paddingLeft: 6 },
-  devBarBg: { width: 50, height: 4, backgroundColor: '#001a00', borderRadius: 2, marginRight: 8, overflow: 'hidden' },
-  devBarFill: { height: '100%', borderRadius: 2 },
-  devName: { color: GREEN, fontSize: 11, fontFamily: MONO },
-  devSubName: { color: '#005520', fontSize: 9, fontFamily: MONO },
-  devRssi: { fontSize: 11, fontFamily: MONO },
-  listHint: { color: '#003310', fontSize: 9, textAlign: 'center', marginTop: 8, fontFamily: MONO },
-  footer: { paddingVertical: 6, alignItems: 'center' },
-  footerText: { color: '#002a0a', fontSize: 8, letterSpacing: 3, fontFamily: MONO },
-  modalOverlay: { flex: 1, backgroundColor: '#000d00dd', justifyContent: 'center' },
-  modalBox: { backgroundColor: '#000f00', borderWidth: 1, borderColor: GREEN, borderRadius: 8, padding: 18, width: '100%' },
-  modalTitle: { color: GREEN, fontSize: 13, letterSpacing: 3, fontFamily: MONO, textAlign: 'center', marginBottom: 10 },
-  modalDevId: { color: '#003310', fontSize: 9, fontFamily: MONO, textAlign: 'center', marginBottom: 10 },
-  modalLabel: { color: DIMGREEN, fontSize: 9, letterSpacing: 2, fontFamily: MONO, marginBottom: 6 },
-  nameOption: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderWidth: 1, borderColor: '#002a00', borderRadius: 4, paddingHorizontal: 10, paddingVertical: 8, marginBottom: 4 },
-  nameOptionSelected: { borderColor: GREEN, backgroundColor: '#001a00' },
-  nameOptionText: { color: '#009933', fontSize: 12, fontFamily: MONO, flex: 1 },
-  nameOptionSource: { color: '#005520', fontSize: 8, fontFamily: MONO },
-  btnGatt: { borderWidth: 1, borderColor: '#005520', borderRadius: 4, paddingVertical: 9, alignItems: 'center', marginTop: 4 },
-  btnGattText: { color: '#00aa33', fontSize: 10, fontFamily: MONO },
-  modalInput: { borderWidth: 1, borderColor: DIMGREEN, borderRadius: 4, color: GREEN, fontFamily: MONO, fontSize: 16, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 10, backgroundColor: '#000d00' },
-  modalToggle: { borderWidth: 1, borderColor: '#003310', borderRadius: 4, paddingVertical: 10, alignItems: 'center', marginBottom: 4 },
-  modalToggleOn: { borderColor: GREEN, backgroundColor: '#001a00' },
-  modalToggleText: { color: '#005520', fontSize: 12, fontFamily: MONO },
-  modalHint: { color: '#005520', fontSize: 9, fontFamily: MONO, textAlign: 'center', marginBottom: 6, lineHeight: 14 },
-  modalEmpty: { color: '#005520', fontSize: 11, fontFamily: MONO, textAlign: 'center', marginVertical: 20, lineHeight: 20 },
-  modalButtons: { flexDirection: 'row', gap: 8, marginTop: 10 },
-  modalBtnSave: { flex: 1, borderWidth: 1, borderColor: GREEN, borderRadius: 4, paddingVertical: 10, alignItems: 'center' },
-  modalBtnSaveText: { color: GREEN, fontSize: 11, fontFamily: MONO },
-  modalBtnCancel: { flex: 1, borderWidth: 1, borderColor: DIMGREEN, borderRadius: 4, paddingVertical: 10, alignItems: 'center' },
-  modalBtnCancelText: { color: DIMGREEN, fontSize: 11, fontFamily: MONO },
-  modalBtnDelete: { flex: 1, borderWidth: 1, borderColor: '#ff4444', borderRadius: 4, paddingVertical: 10, alignItems: 'center' },
-  modalBtnDeleteText: { color: '#ff4444', fontSize: 11, fontFamily: MONO },
-  contactRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderColor: '#001a00', gap: 8 },
-  contactDot: { width: 8, height: 8, borderRadius: 4 },
-  contactAlias: { color: '#00ccff', fontSize: 14, fontFamily: MONO },
-  contactSub: { color: '#005520', fontSize: 9, fontFamily: MONO, marginTop: 2 },
-  contactDist: { fontSize: 10, fontFamily: MONO, marginTop: 2 },
-  contactTrack: { borderWidth: 1, borderColor: GREEN, borderRadius: 4, paddingHorizontal: 8, paddingVertical: 4 },
-  contactTrackText: { color: GREEN, fontSize: 9, fontFamily: MONO },
-  contactEdit: { borderWidth: 1, borderColor: DIMGREEN, borderRadius: 4, paddingHorizontal: 8, paddingVertical: 4 },
-  contactEditText: { color: DIMGREEN, fontSize: 9, fontFamily: MONO },
+  root:{flex:1,backgroundColor:BG,paddingTop:44,paddingHorizontal:12},
+  header:{alignItems:'center',marginBottom:6},
+  headerModel:{color:DIMGREEN,fontSize:10,letterSpacing:6,fontFamily:MONO},
+  headerTitle:{color:GREEN,fontSize:20,fontWeight:'bold',letterSpacing:8,fontFamily:MONO},
+  headerLine:{width:'100%',height:1,backgroundColor:DIMGREEN,marginTop:6},
+  radarWrapper:{alignItems:'center',marginVertical:6,position:'relative'},
+  radarContainer:{position:'relative'},
+  radarBg:{position:'absolute',width:'100%',height:'100%',backgroundColor:BG},
+  radarRing:{position:'absolute',borderWidth:1,borderColor:'#003310'},
+  radarLine:{position:'absolute',backgroundColor:'#003310'},
+  sweepLine:{position:'absolute',height:2,backgroundColor:GREEN,opacity:0.85,shadowColor:GREEN,shadowOpacity:1,shadowRadius:10},
+  blip:{position:'absolute',elevation:5},
+  blipLabel:{position:'absolute',color:'#00ccff',fontSize:7,fontFamily:MONO},
+  radarLabel:{position:'absolute',color:'#005520',fontSize:8,fontFamily:MONO},
+  radarOverlay:{position:'absolute',top:0,left:0,right:0,bottom:0,alignItems:'center',justifyContent:'center',backgroundColor:'#000d00cc'},
+  radarOffText:{color:'#ff4444',fontSize:18,letterSpacing:6,fontFamily:MONO,textAlign:'center'},
+  infoPanel:{borderWidth:1,borderColor:DIMGREEN,borderRadius:6,padding:10,marginBottom:6,backgroundColor:'#00080050',minHeight:62},
+  infoPanelRow:{flexDirection:'row',justifyContent:'space-between',marginBottom:6},
+  infoCol:{flex:1,alignItems:'center'},
+  infoKey:{color:'#005520',fontSize:8,letterSpacing:2,fontFamily:MONO},
+  infoVal:{color:GREEN,fontSize:11,fontFamily:MONO},
+  infoSubVal:{color:'#005520',fontSize:9,fontFamily:MONO},
+  infoValLg:{fontSize:15,fontWeight:'bold',fontFamily:MONO},
+  signalBarBg:{height:5,backgroundColor:'#001a00',borderRadius:3,overflow:'hidden',marginBottom:5},
+  signalBarFill:{height:'100%',borderRadius:3},
+  trendRow:{flexDirection:'row',alignItems:'center',justifyContent:'space-between'},
+  trendText:{fontSize:11,letterSpacing:2,fontFamily:MONO},
+  btnSaveInline:{borderWidth:1,borderColor:'#005520',borderRadius:4,paddingHorizontal:8,paddingVertical:2},
+  btnSaveInlineText:{color:'#00aa33',fontSize:9,fontFamily:MONO},
+  infoIdle:{color:'#005520',fontSize:11,textAlign:'center',letterSpacing:1,fontFamily:MONO,paddingVertical:6,lineHeight:18},
+  controls:{flexDirection:'row',gap:8,marginBottom:6},
+  btnMain:{flex:2,borderWidth:1,borderColor:GREEN,borderRadius:4,paddingVertical:11,alignItems:'center'},
+  btnMainActive:{borderColor:'#ff4444'},
+  btnMainText:{color:GREEN,fontSize:13,letterSpacing:3,fontFamily:MONO},
+  btnContacts:{flex:1,borderWidth:1,borderColor:DIMGREEN,borderRadius:4,paddingVertical:11,alignItems:'center'},
+  btnContactsActive:{borderColor:'#00ccff'},
+  btnContactsText:{color:DIMGREEN,fontSize:12,letterSpacing:1,fontFamily:MONO},
+  btnRegister:{borderWidth:1,borderColor:'#004422',borderRadius:4,paddingVertical:10,alignItems:'center',marginBottom:6},
+  btnRegisterText:{color:'#008833',fontSize:11,letterSpacing:1,fontFamily:MONO},
+  btnBackground:{borderWidth:1,borderColor:'#333',borderRadius:4,paddingVertical:10,alignItems:'center',marginBottom:6},
+  btnBackgroundActive:{borderColor:'#ffaa00',backgroundColor:'#1a1200'},
+  btnBackgroundText:{color:'#555',fontSize:10,letterSpacing:1,fontFamily:MONO},
+  btnSecondary:{flex:1,borderWidth:1,borderColor:'#ffaa00',borderRadius:4,paddingVertical:10,alignItems:'center'},
+  btnSecondaryText:{color:'#ffaa00',fontSize:11,letterSpacing:1,fontFamily:MONO},
+  btnCancel:{flex:1,borderWidth:1,borderColor:'#ff4444',borderRadius:4,paddingVertical:10,alignItems:'center'},
+  btnCancelText:{color:'#ff4444',fontSize:11,letterSpacing:1,fontFamily:MONO},
+  list:{flex:1},
+  devRow:{flexDirection:'row',alignItems:'center',borderBottomWidth:1,borderColor:'#001a00',paddingVertical:7},
+  devRowActive:{backgroundColor:'#001a00'},
+  devRowContact:{borderLeftWidth:2,borderLeftColor:'#00ccff',paddingLeft:6},
+  devBarBg:{width:50,height:4,backgroundColor:'#001a00',borderRadius:2,marginRight:8,overflow:'hidden'},
+  devBarFill:{height:'100%',borderRadius:2},
+  devName:{color:GREEN,fontSize:11,fontFamily:MONO},
+  devSubName:{color:'#005520',fontSize:9,fontFamily:MONO},
+  devRssi:{fontSize:11,fontFamily:MONO},
+  listHint:{color:'#003310',fontSize:9,textAlign:'center',marginTop:8,fontFamily:MONO},
+  footer:{paddingVertical:6,alignItems:'center'},
+  footerText:{color:'#002a0a',fontSize:8,letterSpacing:3,fontFamily:MONO},
+  modalOverlay:{flex:1,backgroundColor:'#000d00dd',justifyContent:'center'},
+  modalBox:{backgroundColor:'#000f00',borderWidth:1,borderColor:GREEN,borderRadius:8,padding:18,width:'100%'},
+  modalTitle:{color:GREEN,fontSize:13,letterSpacing:3,fontFamily:MONO,textAlign:'center',marginBottom:10},
+  modalDevId:{color:'#003310',fontSize:9,fontFamily:MONO,textAlign:'center',marginBottom:10},
+  modalLabel:{color:DIMGREEN,fontSize:9,letterSpacing:2,fontFamily:MONO,marginBottom:6},
+  nameOption:{flexDirection:'row',justifyContent:'space-between',alignItems:'center',borderWidth:1,borderColor:'#002a00',borderRadius:4,paddingHorizontal:10,paddingVertical:8,marginBottom:4},
+  nameOptionSelected:{borderColor:GREEN,backgroundColor:'#001a00'},
+  nameOptionText:{color:'#009933',fontSize:12,fontFamily:MONO,flex:1},
+  nameOptionSource:{color:'#005520',fontSize:8,fontFamily:MONO},
+  btnGatt:{borderWidth:1,borderColor:'#005520',borderRadius:4,paddingVertical:9,alignItems:'center',marginTop:4},
+  btnGattText:{color:'#00aa33',fontSize:10,fontFamily:MONO},
+  modalInput:{borderWidth:1,borderColor:DIMGREEN,borderRadius:4,color:GREEN,fontFamily:MONO,fontSize:16,paddingHorizontal:12,paddingVertical:8,marginBottom:10,backgroundColor:'#000d00'},
+  modalToggle:{borderWidth:1,borderColor:'#003310',borderRadius:4,paddingVertical:10,alignItems:'center',marginBottom:4},
+  modalToggleOn:{borderColor:GREEN,backgroundColor:'#001a00'},
+  modalToggleText:{color:'#005520',fontSize:12,fontFamily:MONO},
+  modalHint:{color:'#005520',fontSize:9,fontFamily:MONO,textAlign:'center',marginBottom:6,lineHeight:14},
+  modalEmpty:{color:'#005520',fontSize:11,fontFamily:MONO,textAlign:'center',marginVertical:20,lineHeight:20},
+  modalButtons:{flexDirection:'row',gap:8,marginTop:10},
+  modalBtnSave:{flex:1,borderWidth:1,borderColor:GREEN,borderRadius:4,paddingVertical:10,alignItems:'center'},
+  modalBtnSaveText:{color:GREEN,fontSize:11,fontFamily:MONO},
+  modalBtnCancel:{flex:1,borderWidth:1,borderColor:DIMGREEN,borderRadius:4,paddingVertical:10,alignItems:'center'},
+  modalBtnCancelText:{color:DIMGREEN,fontSize:11,fontFamily:MONO},
+  modalBtnDelete:{flex:1,borderWidth:1,borderColor:'#ff4444',borderRadius:4,paddingVertical:10,alignItems:'center'},
+  modalBtnDeleteText:{color:'#ff4444',fontSize:11,fontFamily:MONO},
+  contactRow:{flexDirection:'row',alignItems:'center',paddingVertical:10,borderBottomWidth:1,borderColor:'#001a00',gap:8},
+  contactDot:{width:8,height:8,borderRadius:4},
+  contactAlias:{color:'#00ccff',fontSize:14,fontFamily:MONO},
+  contactSub:{color:'#005520',fontSize:9,fontFamily:MONO,marginTop:2},
+  contactDist:{fontSize:10,fontFamily:MONO,marginTop:2},
+  contactTrack:{borderWidth:1,borderColor:GREEN,borderRadius:4,paddingHorizontal:8,paddingVertical:4},
+  contactTrackText:{color:GREEN,fontSize:9,fontFamily:MONO},
+  contactEdit:{borderWidth:1,borderColor:DIMGREEN,borderRadius:4,paddingHorizontal:8,paddingVertical:4},
+  contactEditText:{color:DIMGREEN,fontSize:9,fontFamily:MONO},
 });

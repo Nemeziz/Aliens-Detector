@@ -3,7 +3,7 @@
 
 import * as TaskManager from 'expo-task-manager';
 import * as Notifications from 'expo-notifications';
-import { BleManager } from 'react-native-ble-plx';
+import BleManager from 'react-native-ble-manager';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export const BLE_BACKGROUND_TASK = 'BLE_BACKGROUND_SCAN';
