@@ -6,7 +6,6 @@ import android.bluetooth.le.ScanResult;
 import android.os.Build;
 import android.os.ParcelUuid;
 import android.annotation.SuppressLint;
-import android.util.SparseArray;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.ReactApplicationContext;
@@ -14,7 +13,6 @@ import com.facebook.react.bridge.ReactContext;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
 
-import java.nio.ByteBuffer;
 import java.util.Map;
 
 
@@ -44,7 +42,7 @@ public class DefaultPeripheral extends Peripheral {
             map.putString("id", device.getAddress()); // mac address
             map.putInt("rssi", advertisingRSSI);
 
-            advertising.putMap("rawData", byteArrayToWritableMap(advertisingDataBytes));
+            advertising.putMap("manufacturerData", byteArrayToWritableMap(advertisingDataBytes));
 
             if (android.os.Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 // We can check if peripheral is connectable using the scanresult
@@ -55,6 +53,7 @@ public class DefaultPeripheral extends Peripheral {
                 // We can't check if peripheral is connectable
                 advertising.putBoolean("isConnectable", true);
             }
+
 
             if (advertisingData != null) {
                 String deviceName = advertisingData.getDeviceName();
@@ -77,26 +76,8 @@ public class DefaultPeripheral extends Peripheral {
                         }
                     }
                 }
+
                 advertising.putMap("serviceData", serviceData);
-
-                WritableMap manufacturerData = Arguments.createMap();
-                SparseArray<byte[]> manufacturerRawData = advertisingData.getManufacturerSpecificData();
-                byte[] manufacturerRawBytes = new byte[0];
-                if (manufacturerRawData != null && manufacturerRawData.size() > 0) {
-                    int key = manufacturerRawData.keyAt(0);
-                    byte[] data = manufacturerRawData.valueAt(0);
-                    manufacturerData.putMap(String.format("%04x", key), byteArrayToWritableMap(data));
-
-                    ByteBuffer keyBuffer = ByteBuffer.allocate(Integer.SIZE / Byte.SIZE);
-                    keyBuffer.putInt(key);
-                    byte[] keyBytes = keyBuffer.array();
-                    manufacturerRawBytes = new byte[keyBytes.length + data.length];
-                    System.arraycopy(keyBytes, 0, manufacturerRawBytes, 0, keyBytes.length);
-                    System.arraycopy(data, 0, manufacturerRawBytes, keyBytes.length, data.length);
-                }
-                advertising.putMap("manufacturerData", manufacturerData);
-                advertising.putMap("manufacturerRawData", byteArrayToWritableMap(manufacturerRawBytes));
-
                 advertising.putInt("txPowerLevel", advertisingData.getTxPowerLevel());
             }
 
@@ -112,4 +93,6 @@ public class DefaultPeripheral extends Peripheral {
         advertisingData = result.getScanRecord();
         advertisingDataBytes = advertisingData.getBytes();
     }
+
+
 }

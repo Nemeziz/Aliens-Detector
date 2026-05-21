@@ -10,14 +10,37 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { Audio } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
-import * as TaskManager from 'expo-task-manager';
 import RegisterMode from './RegisterMode';
-import {
-  BLE_BACKGROUND_TASK,
-  setupNotifications,
-  showForegroundNotification,
-  dismissForegroundNotification,
-} from './BleBackgroundService';
+import ScanScreen from './ScanScreen';
+// Background via expo-notifications (sin task-manager)
+async function setupNotifications() {
+  await Notifications.setNotificationChannelAsync('ble-tracker', {
+    name: 'BLE Tracker',
+    importance: Notifications.AndroidImportance.HIGH,
+    vibrationPattern: [0, 250, 150, 250],
+    enableVibrate: true,
+  });
+  await Notifications.setNotificationChannelAsync('ble-foreground', {
+    name: 'Rastreo Activo',
+    importance: Notifications.AndroidImportance.LOW,
+    enableVibrate: false,
+  });
+  await Notifications.requestPermissionsAsync();
+}
+async function showForegroundNotification(names = []) {
+  return Notifications.scheduleNotificationAsync({
+    content: {
+      title: '👾 MOTION TRACKER ACTIVO',
+      body: `Buscando: ${names.join(', ')}`,
+      android: { channelId: 'ble-foreground', ongoing: true, color: '#00ff41', priority: 'low' },
+    },
+    trigger: null,
+  });
+}
+async function dismissForegroundNotification() {
+  await Notifications.dismissAllNotificationsAsync();
+}
+
 
 const { width } = Dimensions.get('window');
 const RADAR_SIZE = width * 0.85;
@@ -385,6 +408,7 @@ export default function App() {
   const [trackedDevice, setTrackedDevice] = useState(null);
   const [permissionsOk, setPermissionsOk] = useState(false);
   const [showList, setShowList] = useState(false);
+  const [scanScreen, setScanScreen] = useState(false);
   const [contacts, setContacts] = useState({});
   const [nameCache, setNameCache] = useState({});
   const [saveModal, setSaveModal] = useState({ visible: false, device: null });
@@ -393,6 +417,7 @@ export default function App() {
   const [backgroundActive, setBackgroundActive] = useState(false);
   const [registerModal, setRegisterModal] = useState(false);
   const scanRef = useRef(false);
+  const deviceOrderRef = useRef([]); // orden de aparición fijo
   const sweepAngle = useRef(new Animated.Value(0)).current;
   const sweepAnim = useRef(null);
   const prevTrendRef = useRef('estable');
@@ -413,7 +438,7 @@ export default function App() {
       if (c) setContacts(JSON.parse(c));
       if (n) setNameCache(JSON.parse(n));
     });
-    TaskManager.isTaskRegisteredAsync(BLE_BACKGROUND_TASK).then(setBackgroundActive);
+    setBackgroundActive(false);
 
     // ── listeners de ble-manager ─────────────────────────────────────────
     const onDiscover = BleManagerEmitter.addListener(
@@ -433,21 +458,25 @@ export default function App() {
           return prev;
         });
 
+        // registrar orden de aparición (nunca reordenar)
+        if (!deviceOrderRef.current.includes(id)) {
+          deviceOrderRef.current = [...deviceOrderRef.current, id];
+        }
         setDevices(prev => {
           const next = new Map(prev);
           const existing = next.get(id);
           const history = existing
             ? [...existing.rssiHistory.slice(-(HISTORY_SIZE-1)), rssi]
             : [rssi];
-          // nombre: primero el anunciado, luego cache, luego OUI
-          const cachedName = advName;
-          const { displayName } = resolveDevice(id, cachedName);
+          const resolvedName = advName || existing?.rawName || null;
+          const { displayName } = resolveDevice(id, resolvedName);
           next.set(id, {
             id,
             name: displayName,
-            rawName: advName || existing?.rawName || null,
+            rawName: resolvedName,
             rssi,
             rssiHistory: history,
+            firstSeen: existing?.firstSeen || Date.now(),
             lastSeen: Date.now(),
           });
           return next;
@@ -501,6 +530,7 @@ export default function App() {
     if (!permissionsOk) return;
     scanRef.current = true;
     setScanning(true);
+    deviceOrderRef.current = [];
     setDevices(new Map());
     startScanCycle();
   }, [permissionsOk, startScanCycle]);
@@ -625,10 +655,6 @@ export default function App() {
       return;
     }
     if (backgroundActive) {
-      try {
-        const isReg = await TaskManager.isTaskRegisteredAsync(BLE_BACKGROUND_TASK);
-        if (isReg) await TaskManager.unregisterTaskAsync(BLE_BACKGROUND_TASK);
-      } catch {}
       await dismissForegroundNotification();
       setBackgroundActive(false);
     } else {
@@ -655,7 +681,10 @@ export default function App() {
   }, [scanning, devices, contacts]);
 
   // ── render ────────────────────────────────────────────────────────────────
-  const deviceList = Array.from(devices.values()).sort((a, b) => b.rssi - a.rssi);
+  // lista en orden de aparición (nunca se reordena, nunca se borra)
+  const deviceList = deviceOrderRef.current
+    .map(id => devices.get(id))
+    .filter(Boolean);
   const count = deviceList.length;
   const contactCount = Object.keys(contacts).length;
   const alertContactCount = Object.values(contacts).filter(c => c.alertEnabled).length;
@@ -776,8 +805,8 @@ export default function App() {
       {scanning && (
         <View style={[styles.controls, {marginTop:2}]}>
           {count>0 && (
-            <TouchableOpacity style={styles.btnSecondary} onPress={() => setShowList(v => !v)}>
-              <Text style={styles.btnSecondaryText}>{showList ? '[ RADAR ]' : `[ ${count} SEÑALES ]`}</Text>
+            <TouchableOpacity style={styles.btnSecondary} onPress={() => setScanScreen(true)}>
+              <Text style={styles.btnSecondaryText}>`[ ${count} SEÑALES ]`</Text>
             </TouchableOpacity>
           )}
           {trackedId && (
@@ -788,40 +817,7 @@ export default function App() {
         </View>
       )}
 
-      {showList && scanning && (
-        <ScrollView style={styles.list} contentContainerStyle={{paddingBottom:16}}>
-          {deviceList.map(dev => {
-            const pct = rssiToPercent(avg(dev.rssiHistory));
-            const isTracked = dev.id === trackedId;
-            const contact = contacts[dev.id];
-            const barColor = pct>0.6 ? GREEN : pct>0.35 ? '#ffaa00' : '#ff4444';
-            return (
-              <TouchableOpacity key={dev.id}
-                style={[styles.devRow, isTracked && styles.devRowActive, contact && styles.devRowContact]}
-                onPress={() => { setTrackedId(dev.id); setShowList(false); }}
-                onLongPress={() => setSaveModal({visible:true, device:dev})}
-              >
-                <View style={styles.devBarBg}>
-                  <View style={[styles.devBarFill, {width:`${Math.round(pct*100)}%`, backgroundColor:barColor}]} />
-                </View>
-                <View style={{flex:1}}>
-                  <Text style={[styles.devName, contact && {color:'#00ccff'}]} numberOfLines={1}>
-                    {contact ? contact.alias : (dev.rawName || dev.name)}
-                  </Text>
-                  {(contact || dev.rawName) && (
-                    <Text style={styles.devSubName} numberOfLines={1}>
-                      {contact ? (dev.rawName || dev.name) : dev.name}
-                    </Text>
-                  )}
-                </View>
-                <Text style={{fontSize:11, marginRight:4}}>{contact?.alertEnabled ? '🔔' : ''}</Text>
-                <Text style={[styles.devRssi, {color:barColor}]}>{dev.rssi} dBm</Text>
-              </TouchableOpacity>
-            );
-          })}
-          <Text style={styles.listHint}>Mantén presionado → guardar contacto</Text>
-        </ScrollView>
-      )}
+
 
       <View style={styles.footer}>
         <Text style={styles.footerText}>WEYLAND-YUTANI CORP  ·  v4.0</Text>
@@ -855,6 +851,22 @@ export default function App() {
         manager={BleManager}
         onDeviceFound={handleRegisterDevice}
         onClose={() => setRegisterModal(false)}
+      />
+      <ScanScreen
+        visible={scanScreen}
+        devices={deviceList}
+        contacts={contacts}
+        scanning={scanning}
+        onClose={() => setScanScreen(false)}
+        onTrack={(id) => { setTrackedId(id); setScanScreen(false); }}
+        onStar={(dev) => {
+          setScanScreen(false);
+          setTimeout(() => setSaveModal({ visible: true, device: dev }), 300);
+        }}
+        onLongPress={(dev) => {
+          setScanScreen(false);
+          setTimeout(() => setSaveModal({ visible: true, device: dev }), 300);
+        }}
       />
     </View>
   );
