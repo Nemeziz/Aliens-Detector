@@ -67,10 +67,23 @@ function DeviceRow({ dev, contact, onStar, onTrack, onLongPress }) {
             {dev.rawName || (isContact ? contact.name : null) || (dev.mfVendor ? `${dev.mfVendor} (sin nombre)` : '— sin nombre')}
           </Text>
         </View>
-        {/* tipo de dispositivo inferido */}
-        {!dev.rawName && (dev.mfVendor || dev.name?.includes('🍎') || dev.name?.includes('📱') || dev.name?.includes('⌚')) && (
+        {/* tipo Apple Continuity */}
+        {dev.appleParsed && (
           <Text style={styles.devType} numberOfLines={1}>
-            {dev.mfVendor ? `Fabricante: ${dev.mfVendor}` : 'Tipo inferido por OUI'}  · MAC {dev.id.startsWith('7') || dev.id.startsWith('6') || dev.id.startsWith('5') ? 'aleatoria' : 'fija'}
+            {dev.appleParsed.primaryIcon} {dev.appleParsed.allTypes}
+            {dev.appleParsed.messages.length > 1 ? ` (+${dev.appleParsed.messages.length-1})` : ''}
+          </Text>
+        )}
+        {/* vendor por OUI o manufacturer data */}
+        {!dev.appleParsed && !dev.rawName && dev.mfVendor && (
+          <Text style={styles.devType} numberOfLines={1}>
+            Fabricante: {dev.mfVendor}
+          </Text>
+        )}
+        {/* reconocido por fingerprint aunque cambió MAC */}
+        {dev.matchedContactId && (
+          <Text style={[styles.devType, { color: '#00ccff' }]} numberOfLines={1}>
+            🔗 Reconocido por fingerprint Apple
           </Text>
         )}
         {/* MAC */}

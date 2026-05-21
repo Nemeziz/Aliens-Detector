@@ -11,6 +11,7 @@ import { Audio } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
 import RegisterMode from './RegisterMode';
+import { parseAppleAdvertising, appleDisplayName, isSameAppleDevice } from './AppleFingerprint';
 import ScanScreen from './ScanScreen';
 // Background via expo-notifications (sin task-manager)
 async function setupNotifications() {
@@ -51,6 +52,7 @@ const HISTORY_SIZE = 10;
 const SCAN_SECONDS = 10; // ciclo de scan en segundos
 const CONTACTS_KEY = 'aliens_contacts';
 const NAME_CACHE_KEY = 'aliens_name_cache';
+const FINGERPRINT_KEY = 'aliens_fingerprints'; // MAC → fingerprint Apple
 const MONO = Platform.OS === 'ios' ? 'Courier' : 'monospace';
 const GREEN = '#00ff41';
 const DIMGREEN = '#00551a';
@@ -438,6 +440,7 @@ export default function App() {
   const [scanScreen, setScanScreen] = useState(false);
   const [contacts, setContacts] = useState({});
   const [nameCache, setNameCache] = useState({});
+  const [fingerprintMap, setFingerprintMap] = useState({}); // fingerprint → contactId
   const [saveModal, setSaveModal] = useState({ visible: false, device: null });
   const [contactsModal, setContactsModal] = useState(false);
   const [resolvingGatt, setResolvingGatt] = useState(false);
@@ -461,9 +464,11 @@ export default function App() {
     Promise.all([
       AsyncStorage.getItem(CONTACTS_KEY),
       AsyncStorage.getItem(NAME_CACHE_KEY),
-    ]).then(([c, n]) => {
+      AsyncStorage.getItem(FINGERPRINT_KEY),
+    ]).then(([c, n, fp]) => {
       if (c) setContacts(JSON.parse(c));
       if (n) setNameCache(JSON.parse(n));
+      if (fp) setFingerprintMap(JSON.parse(fp));
     });
     setBackgroundActive(false);
 
@@ -499,6 +504,21 @@ export default function App() {
           mfVendor = mfId !== null ? MF_IDS[mfId] : null;
         }
 
+        // Parsear fingerprint Apple para identificación cross-MAC
+        const appleParsed = parseAppleAdvertising(mfData);
+        const appleFingerprint = appleParsed?.fingerprint || null;
+
+        // Buscar si este fingerprint ya corresponde a un contacto guardado
+        // aunque la MAC sea diferente
+        if (appleFingerprint) {
+          setFingerprintMap(prev => {
+            if (prev[appleFingerprint] === id) return prev;
+            const updated = { ...prev, [appleFingerprint]: id };
+            AsyncStorage.setItem(FINGERPRINT_KEY, JSON.stringify(updated));
+            return updated;
+          });
+        }
+
         setNameCache(prev => {
           if (advName && prev[id] !== advName) {
             const updated = { ...prev, [id]: advName };
@@ -521,11 +541,26 @@ export default function App() {
           const resolvedName = advName || existing?.rawName || null;
           const resolvedMfVendor = mfVendor || existing?.mfVendor || null;
           const { displayName } = resolveDevice(id, resolvedName, resolvedMfVendor);
+          // Buscar contacto por fingerprint Apple (aunque cambió el MAC)
+          let matchedContactId = null;
+          if (appleFingerprint) {
+            const allContacts = Object.values(contacts);
+            const fpMatch = allContacts.find(c => c.appleFingerprint === appleFingerprint);
+            if (fpMatch && fpMatch.id !== id) {
+              matchedContactId = fpMatch.id;
+              // Actualizar el ID del contacto al MAC actual
+              console.log(`Apple fingerprint match: ${fpMatch.alias} ahora en ${id}`);
+            }
+          }
+
           next.set(id, {
             id,
             name: displayName,
             rawName: resolvedName,
             mfVendor: resolvedMfVendor,
+            appleFingerprint: appleFingerprint || existing?.appleFingerprint || null,
+            appleParsed: appleParsed || existing?.appleParsed || null,
+            matchedContactId, // contacto reconocido por fingerprint aunque cambió MAC
             rssi,
             rssiHistory: history,
             firstSeen: existing?.firstSeen || Date.now(),
@@ -672,7 +707,9 @@ export default function App() {
   }, []);
 
   const handleSaveContact = useCallback((id, alias, name, alertEnabled) => {
-    const updated = { ...contacts, [id]: { id, alias, name, alertEnabled } };
+    const dev = devices.get(id);
+    const fp = dev?.appleFingerprint || null;
+    const updated = { ...contacts, [id]: { id, alias, name, alertEnabled, appleFingerprint: fp } };
     persistContacts(updated);
     setSaveModal({ visible: false, device: null });
     if (backgroundActive) {
