@@ -299,7 +299,7 @@ function RadarDisplay({ devices, trackedId, sweepAngle, contacts }) {
 }
 
 // ── Modal guardar contacto ────────────────────────────────────────────────────
-function SaveContactModal({ visible, device, nameCache, existingContact, onSave, onDelete, onClose, onResolveGatt, resolvingGatt }) {
+function SaveContactModal({ visible, device, nameCache, existingContact, onSave, onDelete, onClose, onResolveGatt, onBondDevice, resolvingGatt, resolvedGattName, onClearGattName }) {
   const [alias, setAlias] = useState('');
   const [alertEnabled, setAlertEnabled] = useState(true);
   const [selectedName, setSelectedName] = useState('');
@@ -323,9 +323,17 @@ function SaveContactModal({ visible, device, nameCache, existingContact, onSave,
     setSelectedName(nameOptions[0]?.name || '');
   }, [visible, device?.id]);
 
+  // Cuando llega el nombre GATT resuelto, pre-llenar alias automáticamente
+  useEffect(() => {
+    if (!resolvedGattName || !visible) return;
+    setAlias(resolvedGattName);
+    setSelectedName(resolvedGattName);
+    if (onClearGattName) onClearGattName();
+  }, [resolvedGattName]);
+
   if (!device) return null;
   return (
-    <Modal visible={visible} transparent animationType="fade">
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.modalOverlay}>
         <ScrollView contentContainerStyle={{ flexGrow:1, justifyContent:'center', padding:16 }}>
           <View style={styles.modalBox}>
@@ -341,10 +349,21 @@ function SaveContactModal({ visible, device, nameCache, existingContact, onSave,
                 <Text style={styles.nameOptionSource}>{opt.source}</Text>
               </TouchableOpacity>
             ))}
+            {/* Emparejar — solución definitiva para MAC aleatoria */}
+            <TouchableOpacity style={styles.btnBond} onPress={() => onBondDevice(device.id)} disabled={resolvingGatt}>
+              {resolvingGatt
+                ? <ActivityIndicator color="#00ccff" size="small" />
+                : <Text style={styles.btnBondText}>🔗 EMPAREJAR (SOLUCIÓN DEFINITIVA)</Text>}
+            </TouchableOpacity>
+            <Text style={styles.bondHint}>
+              El familiar acepta en su teléfono · Android rastreará la MAC aunque cambie
+            </Text>
+
+            {/* GATT solo — si no quiere emparejar */}
             <TouchableOpacity style={styles.btnGatt} onPress={() => onResolveGatt(device.id)} disabled={resolvingGatt}>
               {resolvingGatt
                 ? <ActivityIndicator color={GREEN} size="small" />
-                : <Text style={styles.btnGattText}>⟳ CONECTAR Y RESOLVER NOMBRE (GATT)</Text>}
+                : <Text style={styles.btnGattText}>⟳ Solo resolver nombre (sin emparejar)</Text>}
             </TouchableOpacity>
             <Text style={[styles.modalLabel, {marginTop:12}]}>ALIAS PERSONAL</Text>
             <TextInput
@@ -392,7 +411,7 @@ function SaveContactModal({ visible, device, nameCache, existingContact, onSave,
 function ContactsListModal({ visible, contacts, devices, onEdit, onClose, onTrack }) {
   const entries = Object.values(contacts);
   return (
-    <Modal visible={visible} transparent animationType="slide">
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <View style={styles.modalOverlay}>
         <View style={[styles.modalBox, {maxHeight:'85%', margin:16}]}>
           <Text style={styles.modalTitle}>[ CONTACTOS ]</Text>
@@ -459,6 +478,7 @@ export default function App() {
   const [saveModal, setSaveModal] = useState({ visible: false, device: null });
   const [contactsModal, setContactsModal] = useState(false);
   const [resolvingGatt, setResolvingGatt] = useState(false);
+  const [resolvedGattName, setResolvedGattName] = useState(null);
   const [backgroundActive, setBackgroundActive] = useState(false);
   const [registerModal, setRegisterModal] = useState(false);
   const scanRef = useRef(false);
@@ -703,12 +723,79 @@ export default function App() {
           if (ex) next.set(deviceId, { ...ex, rawName: name, name: resolveDevice(deviceId, name).displayName });
           return next;
         });
-        Alert.alert('✓ Nombre resuelto', name);
+        // Actualizar el modal abierto con el nombre resuelto
+        setResolvedGattName(name);
+        setSaveModal(prev => prev.visible
+          ? { ...prev, device: { ...prev.device, rawName: name, name } }
+          : prev
+        );
       } else {
         Alert.alert('Sin nombre', 'El dispositivo no expone nombre.\nEscribe el alias manualmente.');
       }
     } catch {
       Alert.alert('Error', 'No se pudo conectar.\nEscribe el alias manualmente.');
+    } finally {
+      setResolvingGatt(false);
+      if (scanRef.current) startScanCycle();
+    }
+  }, [nameCache, startScanCycle]);
+
+  // ── emparejar dispositivo (bond) para MAC estable ────────────────────────
+  const bondDevice = useCallback(async (deviceId) => {
+    setResolvingGatt(true);
+    try {
+      await BleManager.stopScan();
+      // Iniciar emparejamiento — Android mostrará diálogo de confirmación al usuario
+      await BleManager.createBond(deviceId);
+      // Tras emparejamiento exitoso, obtener nombre
+      const info = await BleManager.retrieveServices(deviceId);
+      const name = info.name || null;
+      try { await BleManager.disconnect(deviceId); } catch {}
+
+      if (name) {
+        const updated = { ...nameCache, [deviceId]: name };
+        setNameCache(updated);
+        await AsyncStorage.setItem(NAME_CACHE_KEY, JSON.stringify(updated));
+        setDevices(prev => {
+          const next = new Map(prev);
+          const ex = next.get(deviceId);
+          if (ex) next.set(deviceId, { ...ex, rawName: name, name: resolveDevice(deviceId, name).displayName, bonded: true });
+          return next;
+        });
+        setResolvedGattName(name);
+        setSaveModal(prev => prev.visible
+          ? { ...prev, device: { ...prev.device, rawName: name, name, bonded: true } }
+          : prev
+        );
+        Alert.alert(
+          '✅ Dispositivo emparejado',
+          `Nombre: ${name}
+
+Ahora Android rastreará este dispositivo aunque cambie su MAC. Ya puedes guardarlo como contacto.`,
+          [{ text: 'OK' }]
+        );
+      } else {
+        Alert.alert('✅ Emparejado', 'Emparejamiento exitoso.
+Escribe el alias manualmente.');
+        setSaveModal(prev => prev.visible
+          ? { ...prev, device: { ...prev.device, bonded: true } }
+          : prev
+        );
+      }
+    } catch (e) {
+      const msg = e?.message || '';
+      if (msg.includes('already') || msg.includes('bonded')) {
+        Alert.alert('Ya emparejado', 'Este dispositivo ya está emparejado con tu teléfono.
+Android resolverá su MAC automáticamente.');
+      } else {
+        Alert.alert(
+          'No se pudo emparejar',
+          'El usuario del otro teléfono debe aceptar la solicitud de emparejamiento.
+
+Asegúrate que tenga la pantalla desbloqueada.',
+          [{ text: 'OK' }]
+        );
+      }
     } finally {
       setResolvingGatt(false);
       if (scanRef.current) startScanCycle();
@@ -936,7 +1023,10 @@ export default function App() {
         onDelete={handleDeleteContact}
         onClose={() => setSaveModal({visible:false, device:null})}
         onResolveGatt={resolveGatt}
+        onBondDevice={bondDevice}
         resolvingGatt={resolvingGatt}
+        resolvedGattName={resolvedGattName}
+        onClearGattName={() => setResolvedGattName(null)}
       />
       <ContactsListModal
         visible={contactsModal}
@@ -1045,6 +1135,9 @@ const styles = StyleSheet.create({
   nameOptionSelected:{borderColor:GREEN,backgroundColor:'#001a00'},
   nameOptionText:{color:'#009933',fontSize:12,fontFamily:MONO,flex:1},
   nameOptionSource:{color:'#005520',fontSize:8,fontFamily:MONO},
+  btnBond:{borderWidth:2,borderColor:'#00ccff',borderRadius:6,paddingVertical:11,alignItems:'center',marginTop:8,backgroundColor:'#001a2a'},
+  btnBondText:{color:'#00ccff',fontSize:12,fontFamily:MONO,fontWeight:'bold'},
+  bondHint:{color:'#005566',fontSize:9,fontFamily:MONO,textAlign:'center',marginBottom:6,marginTop:4},
   btnGatt:{borderWidth:1,borderColor:'#005520',borderRadius:4,paddingVertical:9,alignItems:'center',marginTop:4},
   btnGattText:{color:'#00aa33',fontSize:10,fontFamily:MONO},
   modalInput:{borderWidth:1,borderColor:DIMGREEN,borderRadius:4,color:GREEN,fontFamily:MONO,fontSize:16,paddingHorizontal:12,paddingVertical:8,marginBottom:10,backgroundColor:'#000d00'},

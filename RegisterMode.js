@@ -118,7 +118,7 @@ export default function RegisterMode({ visible, onDeviceFound, onClose }) {
   const progressPct = ((SCAN_SECONDS - secondsLeft) / SCAN_SECONDS) * 100;
 
   return (
-    <Modal visible={visible} transparent animationType="fade">
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.overlay}>
         <View style={styles.box}>
           <Text style={styles.title}>[ MODO REGISTRO ]</Text>

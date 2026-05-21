@@ -120,7 +120,7 @@ export default function ScanScreen({ visible, devices, contacts, onClose, onTrac
   }, [visible]);
 
   return (
-    <Modal visible={visible} animationType="slide" transparent={false}>
+    <Modal visible={visible} animationType="slide" transparent={false} onRequestClose={onClose}>
       <SafeAreaView style={styles.root}>
         {/* cabecera */}
         <View style={styles.header}>
