@@ -1,8 +1,9 @@
 import React from 'react';
 import {
   View, Text, TouchableOpacity, FlatList, StyleSheet,
-  Platform, Modal, SafeAreaView,
+  Platform, Modal, SafeAreaView, BackHandler,
 } from 'react-native';
+import { useEffect } from 'react';
 
 const MONO = Platform.OS === 'ios' ? 'Courier' : 'monospace';
 const GREEN = '#00ff41';
@@ -108,6 +109,15 @@ function DeviceRow({ dev, contact, onStar, onTrack, onLongPress }) {
 
 export default function ScanScreen({ visible, devices, contacts, onClose, onTrack, onStar, onLongPress, scanning }) {
   const count = devices.length;
+
+  useEffect(() => {
+    if (!visible) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      onClose();
+      return true; // intercepta el back, no sale de la app
+    });
+    return () => sub.remove();
+  }, [visible]);
 
   return (
     <Modal visible={visible} animationType="slide" transparent={false}>

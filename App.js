@@ -204,32 +204,47 @@ function generateBeepWav(frequency = 880, durationMs = 80, volume = 0.8) {
 function useTrackerSound(trackedDevice, scanning) {
   const timerRef = useRef(null);
   const activeRef = useRef(false);
+  const pctRef = useRef(0); // siempre tiene el porcentaje actual
+
+  // actualizar pctRef cada vez que cambia el porcentaje
+  useEffect(() => {
+    if (trackedDevice) pctRef.current = trackedDevice.percent;
+  }, [trackedDevice?.percent]);
+
   const stopBeeps = useCallback(() => {
     activeRef.current = false;
     if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
   }, []);
-  const scheduleBeep = useCallback(async (pct) => {
+
+  const scheduleBeep = useCallback(async () => {
     if (!activeRef.current) return;
     try {
+      const pct = pctRef.current; // leer el valor ACTUAL, no el del closure
       const freq = 600 + Math.round(pct * 800);
       const dur = 60 + Math.round(pct * 30);
       const vol = 0.3 + pct * 0.7;
       const interval = Math.max(120, 2000 - Math.round(pct * 1880));
-      const { sound } = await Audio.Sound.createAsync({ uri: generateBeepWav(freq, dur, vol) }, { volume: vol });
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: generateBeepWav(freq, dur, vol) },
+        { volume: vol }
+      );
       await sound.playAsync();
       timerRef.current = setTimeout(async () => {
         try { await sound.unloadAsync(); } catch {}
-        if (activeRef.current) scheduleBeep(pct);
+        if (activeRef.current) scheduleBeep(); // sin argumento — lee pctRef cada vez
       }, interval);
     } catch {}
-  }, []);
+  }, []); // sin dependencias — siempre lee pctRef.current
+
   useEffect(() => {
     if (!scanning || !trackedDevice) { stopBeeps(); return; }
     Audio.setAudioModeAsync({ playsInSilentModeIOS: true });
     activeRef.current = true;
-    scheduleBeep(trackedDevice.percent);
+    pctRef.current = trackedDevice.percent;
+    scheduleBeep();
     return stopBeeps;
   }, [trackedDevice?.id, scanning]);
+
   return stopBeeps;
 }
 
