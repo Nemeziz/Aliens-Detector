@@ -64,9 +64,15 @@ function DeviceRow({ dev, contact, onStar, onTrack, onLongPress }) {
             </View>
           )}
           <Text style={[styles.devName, isContact && { color: '#00ccff' }]} numberOfLines={1}>
-            {dev.rawName || (isContact ? contact.name : null) || '—'}
+            {dev.rawName || (isContact ? contact.name : null) || (dev.mfVendor ? `${dev.mfVendor} (sin nombre)` : '— sin nombre')}
           </Text>
         </View>
+        {/* tipo de dispositivo inferido */}
+        {!dev.rawName && (dev.mfVendor || dev.name?.includes('🍎') || dev.name?.includes('📱') || dev.name?.includes('⌚')) && (
+          <Text style={styles.devType} numberOfLines={1}>
+            {dev.mfVendor ? `Fabricante: ${dev.mfVendor}` : 'Tipo inferido por OUI'}  · MAC {dev.id.startsWith('7') || dev.id.startsWith('6') || dev.id.startsWith('5') ? 'aleatoria' : 'fija'}
+          </Text>
+        )}
         {/* MAC */}
         <Text style={styles.devMac} numberOfLines={1}>{dev.id.length >= 17 ? dev.id.slice(-17) : dev.id}</Text>
         {/* distancia y tiempo */}
@@ -190,6 +196,7 @@ const styles = StyleSheet.create({
   aliasBadgeText: { color: '#00ccff', fontSize: 11, fontFamily: MONO, fontWeight: 'bold' },
   devName: { color: '#aaffaa', fontSize: 13, fontFamily: MONO, flex: 1 },
   devMac: { color: GREEN, fontSize: 12, fontFamily: MONO, letterSpacing: 1, marginBottom: 3 },
+  devType: { color: '#005a20', fontSize: 9, fontFamily: MONO, marginBottom: 2, fontStyle: 'italic' },
   rowMeta: { flexDirection: 'row', alignItems: 'center' },
   metaText: { fontSize: 10, fontFamily: MONO },
   metaBell: { fontSize: 10 },

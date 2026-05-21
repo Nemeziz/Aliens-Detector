@@ -125,7 +125,21 @@ const OUI = {
   '00:15:5D': { abbr: 'MSF', label: 'PC',       icon: '💻' },
 };
 
-function resolveDevice(id, advertisedName) {
+// Íconos y abreviaturas por vendor string (manufacturer data)
+const MF_VENDOR_MAP = {
+  'Apple':     { icon: '🍎', abbr: 'APL' },
+  'Microsoft': { icon: '🪟', abbr: 'MSF' },
+  'Samsung':   { icon: '📱', abbr: 'SAM' },
+  'Xiaomi':    { icon: '📱', abbr: 'XIA' },
+  'Huawei':    { icon: '📱', abbr: 'HUA' },
+  'Google':    { icon: '📱', abbr: 'PIX' },
+  'Sony':      { icon: '📱', abbr: 'SNY' },
+  'Garmin':    { icon: '⌚', abbr: 'GAR' },
+  'Amazfit':   { icon: '⌚', abbr: 'AMZ' },
+  'Nordic':    { icon: '📡', abbr: 'NRF' },
+};
+
+function resolveDevice(id, advertisedName, mfVendor = null) {
   const mac = id.replace(/-/g, ':').toUpperCase();
   const oui = mac.substring(0, 8);
   const fullMac = mac.length >= 17 ? mac.slice(-17) : mac;
@@ -133,19 +147,32 @@ function resolveDevice(id, advertisedName) {
   const firstByte = parseInt(mac.split(':')[0] || '0', 16);
   const isRandom = !!(firstByte & 0x02);
 
-  // Si tiene nombre real del dispositivo, usarlo directamente
+  // Prioridad: nombre anunciado > OUI > manufacturer data > MAC
   let displayName = advertisedName;
+  let vendorInfo = ouiEntry;
+
+  // Si no hay OUI pero sí manufacturer vendor, usarlo
+  if (!ouiEntry && mfVendor) {
+    vendorInfo = MF_VENDOR_MAP[mfVendor] || { icon: '📡', abbr: mfVendor.slice(0,3).toUpperCase() };
+  }
+
   if (!displayName || displayName.startsWith('DEV-') || displayName.startsWith('[')) {
-    if (ouiEntry) displayName = `${ouiEntry.icon} ${ouiEntry.abbr} ${fullMac}`;
-    else if (isRandom) displayName = `🔀 ${fullMac}`;
-    else displayName = fullMac;
+    if (vendorInfo) {
+      displayName = `${vendorInfo.icon} ${vendorInfo.abbr} ${fullMac}`;
+    } else if (isRandom) {
+      displayName = `🔀 ${fullMac}`;
+    } else {
+      displayName = fullMac;
+    }
   }
 
   const ouiLabel = ouiEntry
     ? `${ouiEntry.icon} ${ouiEntry.label}`
-    : isRandom ? '🔀 Random/Priv' : '';
+    : mfVendor
+      ? `${MF_VENDOR_MAP[mfVendor]?.icon || '📡'} ${mfVendor}`
+      : isRandom ? '🔀 MAC Privada' : '';
 
-  return { displayName, ouiLabel, ouiEntry, fullMac, isRandom };
+  return { displayName, ouiLabel, ouiEntry, vendorInfo, fullMac, isRandom, mfVendor };
 }
 
 // ── Audio beep ────────────────────────────────────────────────────────────────
@@ -449,6 +476,29 @@ export default function App() {
         // ble-manager sí devuelve peripheral.name para Classic y BLE
         const advName = peripheral.name || peripheral.advertising?.localName || null;
 
+        // Leer manufacturer ID del advertising data para identificar fabricante
+        const mfData = peripheral.advertising?.manufacturerData;
+        let mfVendor = null;
+        if (mfData) {
+          // manufacturerData puede ser objeto {bytes:[]} o string hex
+          let mfId = null;
+          if (mfData.bytes && mfData.bytes.length >= 2) {
+            mfId = mfData.bytes[0] | (mfData.bytes[1] << 8);
+          } else if (typeof mfData === 'string' && mfData.length >= 4) {
+            const b0 = parseInt(mfData.substring(0,2), 16);
+            const b1 = parseInt(mfData.substring(2,4), 16);
+            mfId = b0 | (b1 << 8);
+          }
+          const MF_IDS = {
+            0x004C: 'Apple',    0x0006: 'Microsoft', 0x0075: 'Samsung',
+            0x01D7: 'Xiaomi',   0x038F: 'Xiaomi',    0x0157: 'Huawei',
+            0x0310: 'Huawei',   0x0059: 'Nordic',    0x00E0: 'Google',
+            0x048F: 'Google',   0x02D5: 'Sony',      0x012D: 'Garmin',
+            0x0171: 'Amazfit',  0x0499: 'Ruuvi',     0x0087: 'Garmin',
+          };
+          mfVendor = mfId !== null ? MF_IDS[mfId] : null;
+        }
+
         setNameCache(prev => {
           if (advName && prev[id] !== advName) {
             const updated = { ...prev, [id]: advName };
@@ -469,11 +519,13 @@ export default function App() {
             ? [...existing.rssiHistory.slice(-(HISTORY_SIZE-1)), rssi]
             : [rssi];
           const resolvedName = advName || existing?.rawName || null;
-          const { displayName } = resolveDevice(id, resolvedName);
+          const resolvedMfVendor = mfVendor || existing?.mfVendor || null;
+          const { displayName } = resolveDevice(id, resolvedName, resolvedMfVendor);
           next.set(id, {
             id,
             name: displayName,
             rawName: resolvedName,
+            mfVendor: resolvedMfVendor,
             rssi,
             rssiHistory: history,
             firstSeen: existing?.firstSeen || Date.now(),
